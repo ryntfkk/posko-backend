@@ -4,8 +4,12 @@ function validateBody(requiredFields = []) {
     const missingFields = requiredFields.filter((field) => !req.body[field]);
 
     if (missingFields.length > 0) {
+      const messageKey = 'validation.missing_fields';
       return res.status(400).json({
-        message: `Field berikut wajib diisi: ${missingFields.join(', ')}`,
+        messageKey,
+        message: req.t
+          ? req.t(messageKey, { fields: missingFields.join(', ') })
+          : `Field berikut wajib diisi: ${missingFields.join(', ')}`,
         missingFields,
       });
     }

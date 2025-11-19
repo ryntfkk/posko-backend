@@ -3,7 +3,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const env = require('./config/env');
-
+const { i18nMiddleware } = require('./config/i18n');
 
 const authRoutes = require('./modules/auth/routes');
 const orderRoutes = require('./modules/orders/routes');
@@ -19,11 +19,13 @@ const PORT = env.port;
 
 // 4. Middleware (agar server bisa baca data JSON)
 app.use(cors());
+app.use(i18nMiddleware);
 app.use(express.json()); // [cite: 109]
 
 // 5. Route Test Sederhana (untuk cek server hidup)
 app.get('/', (req, res) => {
-  res.send('API Posko Backend Berjalan!'); // [cite: 111]
+  const messageKey = 'app.running';
+  res.send(req.t(messageKey)); // [cite: 111]
 });
 
 // 6. Registrasi router modular
@@ -43,7 +45,7 @@ const startServer = async () => {
     await mongoose.connect(env.mongoUri);
     console.log('✅ Berhasil terhubung ke MongoDB');
 
-       const server = app.listen(PORT, () => {
+      const server = app.listen(PORT, () => {
       console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
     });
 
@@ -52,7 +54,7 @@ const startServer = async () => {
     });
   } catch (err) {
     console.error('❌ Gagal terhubung ke MongoDB:', err);
-  process.exit(1);
+    process.exit(1);
   }
 };
 

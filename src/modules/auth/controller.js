@@ -5,8 +5,8 @@ async function register(req, res, next) {
     const { fullName, email, password, roles = ['customer'] } = req.body;
     const user = new AuthUser({ fullName, email, password, roles });
     await user.save();
-    res.status(201).json({ message: 'Registrasi berhasil', data: user });
-  } catch (error) {
+    const messageKey = 'auth.register_success';
+    res.status(201).json({ messageKey, message: req.t(messageKey), data: user });  } catch (error) {
     next(error);
   }
 }
@@ -16,11 +16,13 @@ async function login(req, res, next) {
     const { email } = req.body;
     const user = await AuthUser.findOne({ email });
     if (!user) {
-      return res.status(404).json({ message: 'User tidak ditemukan' });
-    }
+      const messageKey = 'auth.user_not_found';
+      return res.status(404).json({ messageKey, message: req.t(messageKey) });
+        }
 
-    res.json({ message: 'Login berhasil (dummy)', data: { userId: user._id } });
-  } catch (error) {
+    const messageKey = 'auth.login_success';
+    res.json({ messageKey, message: req.t(messageKey), data: { userId: user._id } });
+    } catch (error) {
     next(error);
   }
 }

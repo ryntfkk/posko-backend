@@ -1,0 +1,18 @@
+{
+  "app.running": "API Posko Backend berjalan!",
+  "auth.register_success": "Registrasi berhasil",
+  "auth.login_success": "Login berhasil (dummy)",
+  "auth.user_not_found": "Pengguna tidak ditemukan",
+  "orders.list": "Daftar pesanan",
+  "orders.created": "Pesanan dibuat",
+  "providers.list": "Daftar penyedia layanan",
+  "providers.created": "Penyedia layanan terdaftar",
+  "payments.list": "Daftar pembayaran",
+  "payments.created": "Pembayaran tercatat",
+  "chat.list": "Daftar ruang chat",
+  "chat.created": "Ruang chat dibuat",
+  "reviews.list": "Daftar ulasan",
+  "reviews.created": "Ulasan tersimpan",
+  "validation.missing_fields": "Field berikut wajib diisi: {{fields}}",
+  "errors.internal": "Terjadi kesalahan pada server"
+}

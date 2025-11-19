@@ -1,0 +1,18 @@
+{
+  "app.running": "Posko Backend API is running!",
+  "auth.register_success": "Registration successful",
+  "auth.login_success": "Login successful (dummy)",
+  "auth.user_not_found": "User not found",
+  "orders.list": "Order list",
+  "orders.created": "Order created",
+  "providers.list": "Provider list",
+  "providers.created": "Provider registered",
+  "payments.list": "Payment list",
+  "payments.created": "Payment recorded",
+  "chat.list": "Chat rooms",
+  "chat.created": "Chat room created",
+  "reviews.list": "Review list",
+  "reviews.created": "Review saved",
+  "validation.missing_fields": "The following fields are required: {{fields}}",
+  "errors.internal": "An unexpected error occurred"
+}

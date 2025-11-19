@@ -3,7 +3,8 @@ const Order = require('./model');
 async function listOrders(req, res, next) {
   try {
     const orders = await Order.find();
-    res.json({ message: 'Daftar pesanan', data: orders });
+    const messageKey = 'orders.list';
+    res.json({ messageKey, message: req.t(messageKey), data: orders });
   } catch (error) {
     next(error);
   }
@@ -14,7 +15,8 @@ async function createOrder(req, res, next) {
     const { userId, items = [], totalAmount = 0 } = req.body;
     const order = new Order({ userId, items, totalAmount });
     await order.save();
-    res.status(201).json({ message: 'Pesanan dibuat', data: order });
+    const messageKey = 'orders.created';
+    res.status(201).json({ messageKey, message: req.t(messageKey), data: order });
   } catch (error) {
     next(error);
   }

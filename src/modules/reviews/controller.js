@@ -3,7 +3,8 @@ const Review = require('./model');
 async function listReviews(req, res, next) {
   try {
     const reviews = await Review.find();
-    res.json({ message: 'Daftar ulasan', data: reviews });
+    const messageKey = 'reviews.list';
+    res.json({ messageKey, message: req.t(messageKey), data: reviews });
   } catch (error) {
     next(error);
   }
@@ -14,7 +15,8 @@ async function createReview(req, res, next) {
     const { userId, providerId, rating, comment = '' } = req.body;
     const review = new Review({ userId, providerId, rating, comment });
     await review.save();
-    res.status(201).json({ message: 'Ulasan tersimpan', data: review });
+    const messageKey = 'reviews.created';
+    res.status(201).json({ messageKey, message: req.t(messageKey), data: review });
   } catch (error) {
     next(error);
   }
