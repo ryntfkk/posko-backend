@@ -73,9 +73,9 @@ async function login(req, res, next) {
     if (!user) {
       const messageKey = 'auth.user_not_found';
       return res.status(404).json({ messageKey, message: req.t(messageKey) });
-        }
+    }
 
-         const isPasswordValid = await bcrypt.compare(password, user.password);
+    const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       const messageKey = 'auth.invalid_password';
       return res.status(401).json({ messageKey, message: req.t(messageKey) });
