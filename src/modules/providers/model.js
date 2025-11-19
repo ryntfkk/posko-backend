@@ -4,7 +4,7 @@ const providerSchema = new mongoose.Schema(
   {
     userId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'AuthUser',
+      ref: 'User',
       required: true,
     },
     services: [String],
