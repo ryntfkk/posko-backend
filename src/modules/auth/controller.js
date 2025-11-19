@@ -1,3 +1,6 @@
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const env = require('../../config/env');
 const User = require('../../models/User');
 
 function sanitizeUser(userDoc) {
@@ -6,6 +9,18 @@ function sanitizeUser(userDoc) {
   return user;
 }
 
+function generateTokens(user) {
+  const payload = {
+    userId: user._id,
+    roles: user.roles,
+    activeRole: user.activeRole,
+  };
+
+  const accessToken = jwt.sign(payload, env.jwtSecret, { expiresIn: '15m' });
+  const refreshToken = jwt.sign(payload, env.jwtSecret, { expiresIn: '7d' });
+
+  return { accessToken, refreshToken };
+}
 
 async function register(req, res, next) {
   try {
@@ -53,24 +68,37 @@ async function register(req, res, next) {
 
 async function login(req, res, next) {
   try {
-    const { email } = req.body;
+    const { email, password } = req.body;
     const user = await User.findOne({ email });
     if (!user) {
       const messageKey = 'auth.user_not_found';
       return res.status(404).json({ messageKey, message: req.t(messageKey) });
         }
 
+         const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      const messageKey = 'auth.invalid_password';
+      return res.status(401).json({ messageKey, message: req.t(messageKey) });
+    }
+
+    const { accessToken, refreshToken } = generateTokens(user);
     const messageKey = 'auth.login_success';
-const safeUser = sanitizeUser(user);
+    const safeUser = sanitizeUser(user);
     res.json({
       messageKey,
       message: req.t(messageKey),
       data: {
-        userId: user._id,
-        roles: safeUser.roles,
-        activeRole: safeUser.activeRole,
-        location: safeUser.location,
-        address: safeUser.address,
+        tokens: { accessToken, refreshToken },
+        profile: {
+          userId: user._id,
+          fullName: safeUser.fullName,
+          email: safeUser.email,
+          roles: safeUser.roles,
+          activeRole: safeUser.activeRole,
+          profilePictureUrl: safeUser.profilePictureUrl,
+          location: safeUser.location,
+          address: safeUser.address,
+        },
       },
     });
   } catch (error) {
