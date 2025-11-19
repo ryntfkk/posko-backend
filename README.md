@@ -16,17 +16,17 @@ Berdasarkan blueprint arsitektur, proyek ini menggunakan teknologi berikut:
 
 ## 📋 Fitur Utama (Roadmap)
 
-Backend ini dirancang untuk mendukung fitur-fitur berikut:
+Backend ini dirancang untuk mendukung fitur-fitur berikut. Status memperlihatkan progres implementasi terkini:
 
-1.  **Manajemen Pengguna (Auth):** Registrasi, Login, dan pembagian role (Customer & Provider) [18].
-2.  **Profil Provider:** Upgrade akun menjadi provider, manajemen layanan, area, dan jadwal [21, 22].
-3.  **Pencarian & Kategori:** Filter provider berdasarkan kategori layanan dan lokasi [25].
-4.  **Sistem Pemesanan (Order):**
-    * *Basic Order:* Mencari provider secara otomatis [30].
-    * *Direct Order:* Memilih provider spesifik [32].
-5.  **Pembayaran Online:** Integrasi penuh dengan Midtrans [35].
-6.  **Chat Real-time:** Komunikasi langsung antara customer dan provider setelah order diterima [51].
-7.  **Ulasan & Rating:** Sistem review setelah layanan selesai [60].
+| Fitur | Status |
+| --- | --- |
+| Manajemen Pengguna (Auth): Registrasi, Login, dan pembagian role (Customer & Provider) [18]. | ✅ Selesai (endpoint dasar & koneksi DB aktif) |
+| Profil Provider: Upgrade akun menjadi provider, manajemen layanan, area, dan jadwal [21, 22]. | ⏳ Dalam proses desain skema |
+| Pencarian & Kategori: Filter provider berdasarkan kategori layanan dan lokasi [25]. | ⏳ Direncanakan (menunggu data kategori) |
+| Sistem Pemesanan (Order): Basic Order & Direct Order [30, 32]. | ⏳ Direncanakan |
+| Pembayaran Online: Integrasi penuh dengan Midtrans [35]. | ⏳ Belum mulai |
+| Chat Real-time: Komunikasi langsung antara customer dan provider [51]. | ⏳ Belum mulai |
+| Ulasan & Rating: Sistem review setelah layanan selesai [60]. | ⏳ Belum mulai |
 
 ## 🧾 Skema User & Contoh Payload
 
@@ -68,14 +68,48 @@ Catatan validasi utama:
 
 ## 🛠️ Cara Instalasi & Menjalankan (Local Development)
 
-Ikuti langkah ini untuk menjalankan server di komputer Anda:
+Ikuti langkah berikut untuk menyiapkan proyek di mesin lokal:
 
 ### 1. Prasyarat
-Pastikan Anda sudah menginstal:
-* [Node.js](https://nodejs.org/)
-* [Git](https://git-scm.com/)
+- [Node.js](https://nodejs.org/) (disarankan versi LTS)
+- [Git](https://git-scm.com/)
 
 ### 2. Clone Repository
 ```bash
-git clone [https://github.com/USERNAME_ANDA/posko-backend.git](https://github.com/USERNAME_ANDA/posko-backend.git)
+git clone https://github.com/USERNAME_ANDA/posko-backend.git
 cd posko-backend
+```
+
+### 3. Pasang Dependensi
+```bash
+npm install
+```
+
+### 4. Siapkan Konfigurasi Environment
+Buat file `.env` di root proyek dengan isi minimal seperti berikut:
+
+```env
+# Port server
+PORT=3000
+
+# Database MongoDB (lokal atau Atlas)
+MONGO_URI=mongodb://localhost:27017/posko
+
+# Autentikasi JWT
+JWT_SECRET=isi_dengan_secret_token_access
+JWT_REFRESH_SECRET=isi_dengan_secret_token_refresh
+```
+
+> Gunakan nilai rahasia yang kuat untuk `JWT_SECRET` dan `JWT_REFRESH_SECRET`. Untuk MongoDB Atlas, ganti `MONGO_URI` dengan string koneksi Anda.
+
+### 5. Jalankan Server
+- Mode produksi (langsung menjalankan Node):
+  ```bash
+  npm run start
+  ```
+- Mode pengembangan dengan auto-restart (butuh `nodemon`):
+  ```bash
+  npm run dev
+  ```
+
+Server akan berjalan di `http://localhost:<PORT>` setelah koneksi database berhasil.
