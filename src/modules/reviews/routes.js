@@ -1,10 +1,10 @@
 const express = require('express');
-const { validateBody } = require('../../middlewares/validator');
 const controller = require('./controller');
+const { validateCreateReview } = require('./validators');
 
 const router = express.Router();
 
 router.get('/', controller.listReviews);
-router.post('/', validateBody(['userId', 'providerId', 'rating']), controller.createReview);
+router.post('/', validateCreateReview, controller.createReview);
 
 module.exports = router;

@@ -12,8 +12,8 @@ async function listOrders(req, res, next) {
 
 async function createOrder(req, res, next) {
   try {
-    const { userId, items = [], totalAmount = 0 } = req.body;
-    const order = new Order({ userId, items, totalAmount });
+    const { userId, providerId, items = [], totalAmount = 0 } = req.body;
+    const order = new Order({ userId, providerId, items, totalAmount });
     await order.save();
     const messageKey = 'orders.created';
     res.status(201).json({ messageKey, message: req.t(messageKey), data: order });
