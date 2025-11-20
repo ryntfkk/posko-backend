@@ -98,9 +98,16 @@ MONGO_URI=mongodb://localhost:27017/posko
 # Autentikasi JWT
 JWT_SECRET=isi_dengan_secret_token_access
 JWT_REFRESH_SECRET=isi_dengan_secret_token_refresh
+
+# (Opsional) Konfigurasi Midtrans untuk pembayaran online
+# MIDTRANS_KEY=isi_dengan_server_key
+# MIDTRANS_CLIENT_KEY=isi_dengan_client_key
+# MIDTRANS_MERCHANT_ID=isi_dengan_merchant_id
 ```
 
 > Gunakan nilai rahasia yang kuat untuk `JWT_SECRET` dan `JWT_REFRESH_SECRET`. Untuk MongoDB Atlas, ganti `MONGO_URI` dengan string koneksi Anda.
+
+> Jika konfigurasi Midtrans tidak diisi, server tetap berjalan dan hanya menampilkan peringatan di log. Isi kunci tersebut bila ingin mengaktifkan fitur pembayaran online.
 
 ### 5. Jalankan Server
 - Mode produksi (langsung menjalankan Node):

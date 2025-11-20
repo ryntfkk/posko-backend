@@ -2,7 +2,7 @@ const dotenv = require('dotenv');
 
 dotenv.config();
 
-const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET', 'JWT_REFRESH_SECRET', 'MIDTRANS_KEY'];
+const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET', 'JWT_REFRESH_SECRET'];
 
 const missingEnvVars = requiredEnvVars.filter(
   (key) => !process.env[key] || process.env[key].trim() === ''
@@ -12,6 +12,19 @@ if (missingEnvVars.length > 0) {
   const message = `Missing required environment variables: ${missingEnvVars.join(', ')}`;
   console.error(message);
   throw new Error(message);
+}
+
+const midtransKeys = ['MIDTRANS_KEY', 'MIDTRANS_CLIENT_KEY', 'MIDTRANS_MERCHANT_ID'];
+const missingMidtransKeys = midtransKeys.filter(
+  (key) => !process.env[key] || process.env[key].trim() === ''
+);
+
+if (missingMidtransKeys.length > 0) {
+  console.warn(
+    `Midtrans configuration is incomplete. Missing keys: ${missingMidtransKeys.join(
+      ', '
+    )}. Payment features may be disabled.`
+  );
 }
 
 const config = {
