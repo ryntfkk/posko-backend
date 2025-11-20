@@ -46,11 +46,6 @@ function validateCreateOrder(req, res, next) {
   const errors = [];
   const body = req.body || {};
 
-  const userId = normalizeString(body.userId);
-  if (!userId) {
-    addError(errors, 'userId', 'validation.user_id_required', 'userId wajib diisi');
-  }
-
   const providerId = normalizeString(body.providerId);
 
   let items = [];
@@ -78,7 +73,6 @@ function validateCreateOrder(req, res, next) {
 
   req.body = {
     ...body,
-    userId,
     providerId,
     items,
     totalAmount,

@@ -4,6 +4,8 @@
   "auth.login_success": "Login berhasil (dummy)",
   "auth.user_not_found": "Pengguna tidak ditemukan",
   "auth.invalid_password": "Kata sandi tidak valid",
+  "auth.unauthorized": "Token otorisasi wajib dikirim",
+  "auth.invalid_token": "Token tidak valid atau kedaluwarsa",
   "auth.email_exists": "Email sudah terdaftar",
   "orders.list": "Daftar pesanan",
   "orders.created": "Pesanan dibuat",
