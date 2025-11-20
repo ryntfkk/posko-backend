@@ -1,42 +1,14 @@
+const {
+  addError,
+  respondValidationErrors,
+  normalizeString,
+  normalizeEmail,
+} = require('../../utils/validation');
+
 const allowedRoles = ['customer', 'provider', 'admin'];
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const phoneRegex = /^\+?[0-9]{10,15}$/;
-
-function addError(errors, field, messageKey, defaultMessage, messageData) {
-  errors.push({ field, messageKey, defaultMessage, messageData });
-}
-
-function translateErrors(req, errors) {
-  return errors.map((error) => ({
-    field: error.field,
-    messageKey: error.messageKey,
-    message: req.t
-      ? req.t(error.messageKey, error.messageData)
-      : error.defaultMessage,
-  }));
-}
-
-function respondValidationErrors(req, res, errors) {
-  const messageKey = 'validation.invalid_payload';
-  const message = req.t
-    ? req.t(messageKey)
-    : 'Payload tidak valid';
-
-  return res.status(400).json({
-    messageKey,
-    message,
-    errors: translateErrors(req, errors),
-  });
-}
-
-function normalizeString(value) {
-  return typeof value === 'string' ? value.trim() : value;
-}
-
-function normalizeEmail(email) {
-  return normalizeString(email)?.toLowerCase() || '';
-}
 
 function isStrongPassword(password) {
   if (typeof password !== 'string') return false;
@@ -180,4 +152,4 @@ function validateLogin(req, res, next) {
   return next();
 }
 
-module.exports = { validateRegister, validateLogin }; 
+module.exports = { validateRegister, validateLogin };
