@@ -6,6 +6,7 @@ const User = require('../../models/User');
 function sanitizeUser(userDoc) {
   const user = userDoc.toObject();
   delete user.password;
+  delete user.refreshTokens;
   return user;
 }
 
@@ -17,7 +18,7 @@ function generateTokens(user) {
   };
 
   const accessToken = jwt.sign(payload, env.jwtSecret, { expiresIn: '15m' });
-  const refreshToken = jwt.sign(payload, env.jwtSecret, { expiresIn: '7d' });
+  const refreshToken = jwt.sign(payload, env.jwtRefreshSecret, { expiresIn: '7d' });
 
   return { accessToken, refreshToken };
 }
@@ -82,6 +83,8 @@ async function login(req, res, next) {
     }
 
     const { accessToken, refreshToken } = generateTokens(user);
+    user.refreshTokens.push(refreshToken);
+    await user.save();
     const messageKey = 'auth.login_success';
     const safeUser = sanitizeUser(user);
     res.json({

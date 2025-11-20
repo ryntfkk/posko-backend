@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const bcrypt = require('bcrypt');
 
 // Membuat Skema (Cetakan Data) untuk User
 const userSchema = new mongoose.Schema({
@@ -17,6 +18,10 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: true,
     // Nanti di sini kita simpan password yang sudah di-acak (hash), bukan teks biasa [19]
+  },
+  refreshTokens: {
+    type: [String],
+    default: [],
   },
    address: {
     province: {
@@ -112,6 +117,18 @@ const userSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 userSchema.index({ location: '2dsphere' });
+
+userSchema.pre('save', async function (next) {
+  if (!this.isModified('password')) return next();
+
+  try {
+    const saltRounds = 10;
+    this.password = await bcrypt.hash(this.password, saltRounds);
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
 
 // Membuat Model dari Skema di atas
 const User = mongoose.model('User', userSchema);

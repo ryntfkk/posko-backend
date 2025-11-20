@@ -2,7 +2,7 @@ const dotenv = require('dotenv');
 
 dotenv.config();
 
-const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET', 'MIDTRANS_KEY'];
+const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET', 'JWT_REFRESH_SECRET', 'MIDTRANS_KEY'];
 
 const missingEnvVars = requiredEnvVars.filter(
   (key) => !process.env[key] || process.env[key].trim() === ''
@@ -19,6 +19,7 @@ const config = {
   port: Number(process.env.PORT) || 3000,
   mongoUri: process.env.MONGO_URI,
   jwtSecret: process.env.JWT_SECRET,
+  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET,
   midtransKey: process.env.MIDTRANS_KEY,
   midtransClientKey: process.env.MIDTRANS_CLIENT_KEY,
   midtransMerchantId: process.env.MIDTRANS_MERCHANT_ID,
