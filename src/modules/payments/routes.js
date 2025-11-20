@@ -5,6 +5,6 @@ const { validateCreatePayment } = require('./validators');
 const router = express.Router();
 
 router.get('/', controller.listPayments);
-const { validateCreatePayment } = require('./validators');
+router.post('/', validateCreatePayment, controller.createPayment);
 
 module.exports = router;
