@@ -5,6 +5,6 @@ const { validateCreateProvider } = require('./validators');
 const router = express.Router();
 
 router.get('/', controller.listProviders);
-const { validateCreateProvider } = require('./validators');
+router.post('/', validateCreateProvider, controller.createProvider);
 
 module.exports = router;
