@@ -39,6 +39,11 @@ const userSchema = new mongoose.Schema({
       default: '',
       trim: true,
     },
+    postalCode: {  
+      type: String,
+      default: '',
+      trim: true,
+    },
     detail: {
       type: String,
       default: '',
