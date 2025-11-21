@@ -7,10 +7,32 @@ const providerSchema = new mongoose.Schema(
       ref: 'User',
       required: true,
     },
-    services: [String],
+    // [UBAH DISINI] Services sekarang menyimpan detail harga & referensi ke Katalog
+    services: [
+      {
+        serviceId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'Service', // Terhubung ke model Service (Langkah 1)
+          required: true,
+        },
+        price: {
+          type: Number,
+          required: true, // INI ADALAH RATECARD (Harga khusus si Provider)
+        },
+        isActive: {
+          type: Boolean,
+          default: true, // Provider bisa mematikan layanan ini sementara (misal: alat rusak)
+        },
+      },
+    ],
     rating: {
       type: Number,
       default: 0,
+    },
+    // Status Online/Offline untuk menerima orderan
+    isOnline: {
+      type: Boolean,
+      default: false, 
     },
   },
   { timestamps: true }

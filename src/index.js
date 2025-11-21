@@ -4,13 +4,13 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const env = require('./config/env');
 const { i18nMiddleware } = require('./config/i18n');
-
+const reviewRoutes = require('./modules/reviews/routes');
+const serviceRoutes = require('./modules/services/routes');
 const authRoutes = require('./modules/auth/routes');
 const orderRoutes = require('./modules/orders/routes');
 const providerRoutes = require('./modules/providers/routes');
 const paymentRoutes = require('./modules/payments/routes');
 const chatRoutes = require('./modules/chat/routes');
-const reviewRoutes = require('./modules/reviews/routes');
 const errorHandler = require('./middlewares/errorHandler');
 
 // 3. Inisialisasi aplikasi Express
@@ -35,6 +35,7 @@ app.use('/api/providers', providerRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/reviews', reviewRoutes);
+app.use('/api/services', serviceRoutes);
 
 // 7. Middleware error handler
 app.use(errorHandler);
