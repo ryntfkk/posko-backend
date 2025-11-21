@@ -13,7 +13,8 @@ const paymentSchema = new mongoose.Schema(
     },
     method: {
       type: String,
-      enum: ['bank_transfer', 'credit_card', 'cash'],
+      // [PERBAIKAN] Tambahkan 'midtrans_snap' di sini
+      enum: ['bank_transfer', 'credit_card', 'cash', 'midtrans_snap'],
       default: 'bank_transfer',
     },
     status: {

@@ -19,6 +19,7 @@
     "i18next-fs-backend": "^2.6.1",
     "i18next-http-middleware": "^3.8.2",
     "jsonwebtoken": "^9.0.2",
+    "midtrans-client": "^1.4.3",
     "mongoose": "^8.20.0",
     "socket.io": "^4.8.1"
   },

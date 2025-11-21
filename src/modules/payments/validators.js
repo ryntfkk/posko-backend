@@ -1,6 +1,7 @@
 const { addError, respondValidationErrors, normalizeString } = require('../../utils/validation');
 
-const allowedMethods = ['bank_transfer', 'credit_card', 'cash'];
+// [PERBAIKAN] Tambahkan 'midtrans_snap' ke sini juga
+const allowedMethods = ['bank_transfer', 'credit_card', 'cash', 'midtrans_snap'];
 
 function validateCreatePayment(req, res, next) {
   const errors = [];
@@ -11,14 +12,11 @@ function validateCreatePayment(req, res, next) {
     addError(errors, 'orderId', 'validation.order_id_required', 'orderId wajib diisi');
   }
 
-  const amount = body.amount;
-  if (amount === undefined || amount === null) {
-    addError(errors, 'amount', 'validation.amount_required', 'Jumlah pembayaran wajib diisi');
-  } else if (typeof amount !== 'number' || Number.isNaN(amount) || amount < 0) {
-    addError(errors, 'amount', 'validation.amount_invalid', 'Jumlah pembayaran harus angka tidak negatif');
-  }
-
-  const method = normalizeString(body.method) || 'bank_transfer';
+  // Validasi amount dihapus di sini karena di-handle controller (seperti rencana sebelumnya), 
+  // tapi jika masih ada sisa kode lama, pastikan method-nya sinkron.
+  
+  const method = normalizeString(body.method);
+  // Jika user mengirim method manual, pastikan valid
   if (method && !allowedMethods.includes(method)) {
     addError(errors, 'method', 'validation.method_invalid', 'Metode pembayaran tidak valid');
   }
@@ -27,7 +25,7 @@ function validateCreatePayment(req, res, next) {
     return respondValidationErrors(req, res, errors);
   }
 
-  req.body = { ...body, orderId, amount, method };
+  req.body = { ...body, orderId };
   return next();
 }
 
