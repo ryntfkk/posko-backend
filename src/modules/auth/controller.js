@@ -109,4 +109,44 @@ async function login(req, res, next) {
   }
 }
 
-module.exports = { register, login };
+// TAMBAHKAN FUNGSI INI
+async function getProfile(req, res, next) {
+  try {
+    // req.user didapat dari middleware authenticate (hasil decode token)
+    const userId = req.user.userId;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      const messageKey = 'auth.user_not_found';
+      return res.status(404).json({ messageKey, message: req.t(messageKey) });
+    }
+
+    const safeUser = sanitizeUser(user);
+    const messageKey = 'auth.profile_success'; // Anda bisa tambah key ini di translation.json jika mau, atau biarkan string biasa
+    
+    // Struktur response disesuaikan dengan ekspektasi Frontend (result.data.profile)
+    res.json({
+      messageKey,
+      message: 'Profile fetched successfully',
+      data: {
+        profile: {
+          userId: user._id,
+          fullName: safeUser.fullName,
+          email: safeUser.email,
+          roles: safeUser.roles,
+          activeRole: safeUser.activeRole,
+          profilePictureUrl: safeUser.profilePictureUrl,
+          location: safeUser.location,
+          address: safeUser.address,
+          phoneNumber: safeUser.phoneNumber,
+          birthDate: safeUser.birthDate,
+        },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// UPDATE EXPORT
+module.exports = { register, login, getProfile };
