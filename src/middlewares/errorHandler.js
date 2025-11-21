@@ -1,28 +1,35 @@
-// Middleware penanganan error umum
+// src/middlewares/errorHandler.js
+
 function errorHandler(err, req, res, next) {
-  console.error('Terjadi error:', err);
+  // 1. Tampilkan error di Terminal VS Code (PENTING UNTUK DIBACA)
+  console.error('❌ ERROR LOG:', err);
 
-    if (err?.code === 11000 && err?.keyPattern?.email) {
-    const messageKey = 'auth.email_exists';
-    const message = req.t
-      ? req.t(messageKey)
-      : 'Email sudah terdaftar';
-
+  // 2. Cek Error Duplicate Key (Kode 11000)
+  if (err.code === 11000) {
+    const field = Object.keys(err.keyPattern)[0];
     return res.status(409).json({
-      messageKey,
-      message,
+      messageKey: 'validation.duplicate_entry',
+      message: `Data untuk ${field} sudah ada. Tidak boleh duplikat.`,
+      originalError: err.message // Tampilkan pesan asli
     });
   }
 
-  const status = err.status || 500;
-  const messageKey = err.messageKey || 'errors.internal';
-  const message = req.t
-    ? req.t(messageKey, err.messageData)
-    : err.message || 'Terjadi kesalahan pada server';
+  // 3. Cek Error Validasi Mongoose (Misal: Tipe data salah, field wajib kurang)
+  if (err.name === 'ValidationError') {
+    const errors = Object.values(err.errors).map(e => e.message);
+    return res.status(400).json({
+      messageKey: 'validation.mongoose_error',
+      message: 'Gagal validasi database',
+      errors: errors
+    });
+  }
 
+  // 4. Handle Error Lainnya (JANGAN DISEMBUNYIKAN DULU)
+  const status = err.status || 500;
   res.status(status).json({
-    messageKey,
-    message,
+    messageKey: 'errors.internal',
+    message: err.message || 'Terjadi kesalahan pada server', // Tampilkan pesan error asli
+    stack: err.stack // Tampilkan stack trace biar jelas baris coding yang error
   });
 }
 
