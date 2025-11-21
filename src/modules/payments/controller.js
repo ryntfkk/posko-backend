@@ -75,5 +75,68 @@ async function createPayment(req, res, next) {
     next(error);
   }
 }
+async function handleNotification(req, res, next) {
+  try {
+    const notification = req.body;
+    
+    // 1. Ambil status transaksi dari payload Midtrans
+    const transactionStatus = notification.transaction_status;
+    const fraudStatus = notification.fraud_status;
+    const orderIdFull = notification.order_id; // Format: POSKO-ORDERID-TIMESTAMP
 
-module.exports = { listPayments, createPayment };
+    // 2. Ekstrak Order ID asli dari format POSKO-{id}-{timestamp}
+    // Kita split berdasarkan '-' dan ambil bagian tengah (index 1)
+    const splitOrderId = orderIdFull.split('-');
+    const realOrderId = splitOrderId[1]; 
+
+    if (!realOrderId) {
+        return res.status(400).json({ message: 'Invalid Order ID format' });
+    }
+
+    // 3. Tentukan Status Pembayaran Baru
+    let paymentStatus = 'pending';
+    if (transactionStatus == 'capture') {
+        if (fraudStatus == 'challenge') {
+            paymentStatus = 'pending'; // Challenge = belum pasti sukses
+        } else if (fraudStatus == 'accept') {
+            paymentStatus = 'paid';
+        }
+    } else if (transactionStatus == 'settlement') {
+        paymentStatus = 'paid';
+    } else if (transactionStatus == 'cancel' || transactionStatus == 'deny' || transactionStatus == 'expire') {
+        paymentStatus = 'failed';
+    } else if (transactionStatus == 'pending') {
+        paymentStatus = 'pending';
+    }
+
+    // 4. Update Status di Database (Payment & Order)
+    if (paymentStatus === 'paid') {
+        // Update Payment jadi 'paid'
+        await Payment.findOneAndUpdate({ orderId: realOrderId }, { status: 'paid' });
+        
+        // Update Order. Jika Direct -> 'accepted', Jika Basic -> 'searching' (atau sesuai logika bisnis Anda)
+        // Di sini kita set default ke 'searching' atau biarkan frontend handle logic selanjutnya.
+        // Untuk contoh ini, kita anggap pesanan TERKONFIRMASI jika sudah dibayar.
+        const order = await Order.findById(realOrderId);
+        if (order) {
+            // Jika direct order, status lsg 'accepted' (menunggu mitra kerja). 
+            // Jika basic, 'searching' (mencari mitra).
+            const nextStatus = order.orderType === 'direct' ? 'accepted' : 'searching';
+            await Order.findByIdAndUpdate(realOrderId, { status: nextStatus });
+        }
+    } else if (paymentStatus === 'failed') {
+        await Payment.findOneAndUpdate({ orderId: realOrderId }, { status: 'failed' });
+        await Order.findByIdAndUpdate(realOrderId, { status: 'cancelled' });
+    }
+
+    // 5. Wajib response 200 OK ke Midtrans agar tidak dikirim notifikasi berulang
+    res.status(200).json({ message: 'OK' });
+
+  } catch (error) {
+    console.error('Webhook Error:', error);
+    next(error);
+  }
+}
+
+// Jangan lupa tambahkan ke exports
+module.exports = { listPayments, createPayment, handleNotification };
