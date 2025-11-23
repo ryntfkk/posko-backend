@@ -109,7 +109,7 @@ async function listIncomingOrders(req, res, next) {
         // KONDISI A: Basic Order (Broadcast ke yang punya skill sesuai)
         { 
           orderType: 'basic', 
-          status: { $in: ['pending', 'searching'] }, // Terima pending & searching
+          status: { $in: ['searching'] }, // Terima pending & searching
           providerId: null, // Belum diambil siapapun
           'items.serviceId': { $in: myServiceIds } // Filter skill
         },
@@ -117,7 +117,7 @@ async function listIncomingOrders(req, res, next) {
         // KONDISI B: Direct Order (Khusus ditujukan ke Provider ini)
         { 
           providerId: provider._id, 
-          status: { $in: ['pending', 'searching', 'accepted', 'on_the_way', 'working', 'waiting_approval'] } 
+          status: { $in: ['on_the_way', 'working', 'waiting_approval'] } 
         }
       ]
     })
