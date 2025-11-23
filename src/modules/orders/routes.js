@@ -7,7 +7,11 @@ const router = express.Router();
 
 router.use(authenticate);
 
+router.get('/incoming', controller.listIncomingOrders);
+router.patch('/:orderId/accept', controller.acceptOrder); 
+
 router.get('/', controller.listOrders);
+router.get('/:orderId', controller.getOrderById); 
 router.post('/', validateCreateOrder, controller.createOrder);
 
 module.exports = router;

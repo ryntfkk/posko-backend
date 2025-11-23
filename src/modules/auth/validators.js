@@ -119,6 +119,7 @@ function validateRegister(req, res, next) {
       province: normalizeString(body?.address?.province) || '',
       district: normalizeString(body?.address?.district) || '',
       city: normalizeString(body?.address?.city) || '',
+      postalCode: normalizeString(body?.address?.postalCode) || '',
       detail: normalizeString(body?.address?.detail) || '',
     },
     location: hasCoordinates
