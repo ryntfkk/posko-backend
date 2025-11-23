@@ -5,6 +5,7 @@ async function listOrders(req, res, next) {
   try {
     const { roles = [], userId } = req.user || {};
     const isAdminOrProvider = roles.includes('admin') || roles.includes('provider');
+    
     if (!isAdminOrProvider && !userId) {
       const messageKey = 'auth.unauthorized';
       return res.status(401).json({ messageKey, message: req.t ? req.t(messageKey) : 'Unauthorized' });
@@ -12,7 +13,16 @@ async function listOrders(req, res, next) {
 
     const filter = isAdminOrProvider ? {} : { userId };
 
-    const orders = await Order.find(filter);
+    // [PERBAIKAN] Tambahkan populate dan sort
+    const orders = await Order.find(filter)
+      .populate('items.serviceId', 'name category iconUrl') // Ambil detail layanan (PENTING untuk UI)
+      .populate({
+        path: 'providerId',
+        select: 'userId rating',
+        populate: { path: 'userId', select: 'fullName profilePictureUrl' } // Ambil detail mitra
+      })
+      .sort({ createdAt: -1 }); // Urutkan dari yang terbaru
+
     const messageKey = 'orders.list';
     res.json({ messageKey, message: req.t(messageKey), data: orders });
   } catch (error) {

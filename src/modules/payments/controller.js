@@ -26,7 +26,7 @@ async function createPayment(req, res, next) {
     // 2. Buat Order ID unik untuk Midtrans
     // Format: POSKO-{MONGO_ID}-{TIMESTAMP}
     const midtransOrderId = `POSKO-${order._id}-${Date.now()}`;
-    const currentBaseUrl = "localhost:3000";
+    const currentBaseUrl = "http://localhost:3000";
     const transactionDetails = {
       transaction_details: {
         order_id: midtransOrderId,

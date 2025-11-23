@@ -1,9 +1,13 @@
-// 1. Import library yang dibutuhkan
+// src/index.js
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const http = require('http'); // [TAMBAHAN]
 const env = require('./config/env');
 const { i18nMiddleware } = require('./config/i18n');
+const { initSocket } = require('./modules/chat/socket'); // [TAMBAHAN]
+
+// Import Routes
 const reviewRoutes = require('./modules/reviews/routes');
 const serviceRoutes = require('./modules/services/routes');
 const authRoutes = require('./modules/auth/routes');
@@ -13,22 +17,20 @@ const paymentRoutes = require('./modules/payments/routes');
 const chatRoutes = require('./modules/chat/routes');
 const errorHandler = require('./middlewares/errorHandler');
 
-// 3. Inisialisasi aplikasi Express
 const app = express();
+const server = http.createServer(app); // [TAMBAHAN] Bungkus app dengan HTTP Server
+
 const PORT = env.port;
 
-// 4. Middleware (agar server bisa baca data JSON)
 app.use(cors());
 app.use(i18nMiddleware);
-app.use(express.json()); // [cite: 109]
+app.use(express.json());
 
-// 5. Route Test Sederhana (untuk cek server hidup)
 app.get('/', (req, res) => {
   const messageKey = 'app.running';
-  res.send(req.t(messageKey)); // [cite: 111]
+  res.send(req.t(messageKey));
 });
 
-// 6. Registrasi router modular
 app.use('/api/auth', authRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/providers', providerRoutes);
@@ -37,16 +39,18 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/reviews', reviewRoutes);
 app.use('/api/services', serviceRoutes);
 
-// 7. Middleware error handler
 app.use(errorHandler);
 
-// 8. Koneksi ke MongoDB & Menjalankan Server
+// [TAMBAHAN] Inisialisasi Socket.io
+initSocket(server);
+
 const startServer = async () => {
   try {
     await mongoose.connect(env.mongoUri);
     console.log('✅ Berhasil terhubung ke MongoDB');
 
-      const server = app.listen(PORT, () => {
+    // [PERBAIKAN] Gunakan server.listen, BUKAN app.listen
+    server.listen(PORT, () => {
       console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
     });
 
