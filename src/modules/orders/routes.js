@@ -9,6 +9,7 @@ router.use(authenticate);
 
 router.get('/incoming', controller.listIncomingOrders);
 router.patch('/:orderId/accept', controller.acceptOrder); 
+router.patch('/:orderId/status', controller.updateOrderStatus);
 
 router.get('/', controller.listOrders);
 router.get('/:orderId', controller.getOrderById); 

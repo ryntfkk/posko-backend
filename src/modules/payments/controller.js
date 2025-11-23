@@ -1,4 +1,4 @@
-const mongoose = require('mongoose'); // [TAMBAHAN PENTING]
+const mongoose = require('mongoose');
 const Payment = require('./model');
 const Order = require('../orders/model');
 const snap = require('../../utils/midtrans');
@@ -7,7 +7,7 @@ async function listPayments(req, res, next) {
   try {
     const payments = await Payment.find().populate('orderId');
     const messageKey = 'payments.list';
-    res.json({ messageKey, message: req.t(messageKey), data: payments });
+    res.json({ messageKey, message: req.t ? req.t(messageKey) : 'Payment List', data: payments });
   } catch (error) {
     next(error);
   }
@@ -24,9 +24,9 @@ async function createPayment(req, res, next) {
     }
 
     // 2. Buat Order ID unik untuk Midtrans
-    // Format: POSKO-{MONGO_ID}-{TIMESTAMP}
     const midtransOrderId = `POSKO-${order._id}-${Date.now()}`;
-    const currentBaseUrl = "http://localhost:3000";
+    const currentBaseUrl = process.env.CLIENT_URL || "http://localhost:3000"; // Gunakan env jika ada
+    
     const transactionDetails = {
       transaction_details: {
         order_id: midtransOrderId,
@@ -43,7 +43,6 @@ async function createPayment(req, res, next) {
         quantity: item.quantity,
         name: item.name.substring(0, 50)
       })),
-// [TAMBAHAN BARU] Ini akan memaksa Midtrans redirect ke sini, mengabaikan Dashboard
       callbacks: {
         finish: `${currentBaseUrl}/orders`,
         error: `${currentBaseUrl}/orders`,
@@ -52,8 +51,6 @@ async function createPayment(req, res, next) {
     };
 
     const transaction = await snap.createTransaction(transactionDetails);
-    const snapToken = transaction.token;
-    const redirectUrl = transaction.redirect_url;
 
     const payment = new Payment({
       orderId: order._id,
@@ -67,8 +64,8 @@ async function createPayment(req, res, next) {
       message: 'Payment Token Generated',
       data: {
         paymentId: payment._id,
-        snapToken: snapToken,
-        redirectUrl: redirectUrl
+        snapToken: transaction.token,
+        redirectUrl: transaction.redirect_url
       }
     });
 
@@ -78,29 +75,25 @@ async function createPayment(req, res, next) {
   }
 }
 
-// --- [FUNGSI WEBHOOK DENGAN PERBAIKAN] ---
 async function handleNotification(req, res, next) {
   try {
     const notification = req.body;
     
     const transactionStatus = notification.transaction_status;
     const fraudStatus = notification.fraud_status;
-    const orderIdFull = notification.order_id; // Contoh: POSKO-6920f...-1763...
+    const orderIdFull = notification.order_id; 
 
     // 1. Ekstrak Order ID Asli
-    // Format split: ["POSKO", "REAL_ORDER_ID", "TIMESTAMP"]
     const splitOrderId = orderIdFull.split('-');
     const realOrderId = splitOrderId[1]; 
 
-    // 2. [FIX CRITICAL ERROR] Validasi apakah ini ID MongoDB yang valid?
-    // Jika "569b" masuk sini, dia akan ditolak dengan aman, server tidak crash.
+    // 2. Validasi ID MongoDB
     if (!realOrderId || !mongoose.Types.ObjectId.isValid(realOrderId)) {
-        console.log(`⚠️ Mengabaikan notifikasi dengan Order ID tidak valid: ${realOrderId} (Full: ${orderIdFull})`);
-        // Return 200 OK agar Midtrans berhenti mengirim ulang (retry) notifikasi sampah ini
+        console.log(`⚠️ Ignored invalid Order ID: ${realOrderId}`);
         return res.status(200).json({ message: 'Invalid Order ID ignored' });
     }
 
-    // 3. Tentukan Status
+    // 3. Tentukan Status Pembayaran
     let paymentStatus = 'pending';
     if (transactionStatus == 'capture') {
         if (fraudStatus == 'challenge') {
@@ -110,13 +103,11 @@ async function handleNotification(req, res, next) {
         }
     } else if (transactionStatus == 'settlement') {
         paymentStatus = 'paid';
-    } else if (transactionStatus == 'cancel' || transactionStatus == 'deny' || transactionStatus == 'expire') {
+    } else if (['cancel', 'deny', 'expire'].includes(transactionStatus)) {
         paymentStatus = 'failed';
-    } else if (transactionStatus == 'pending') {
-        paymentStatus = 'pending';
     }
 
-    console.log(`🔔 Webhook Received: ${realOrderId} -> ${paymentStatus}`);
+    console.log(`🔔 Webhook: ${realOrderId} status ${paymentStatus} (${transactionStatus})`);
 
     // 4. Update Database
     if (paymentStatus === 'paid') {
@@ -124,8 +115,15 @@ async function handleNotification(req, res, next) {
         
         const order = await Order.findById(realOrderId);
         if (order) {
-            const nextStatus = order.orderType === 'direct' ? 'accepted' : 'searching';
-            await Order.findByIdAndUpdate(realOrderId, { status: nextStatus });
+            // [PERBAIKAN UTAMA DISINI]
+            // Jika Direct Order -> Status 'paid' (Menunggu konfirmasi Provider)
+            // Jika Basic Order  -> Status 'searching' (Mencari Provider via broadcast)
+            
+            // Cek dulu agar tidak menimpa status jika sudah diproses lanjut (misal accepted/working)
+            if (['pending', 'cancelled'].includes(order.status)) {
+                const nextStatus = order.orderType === 'direct' ? 'paid' : 'searching';
+                await Order.findByIdAndUpdate(realOrderId, { status: nextStatus });
+            }
         }
     } else if (paymentStatus === 'failed') {
         await Payment.findOneAndUpdate({ orderId: realOrderId }, { status: 'failed' });
@@ -136,7 +134,6 @@ async function handleNotification(req, res, next) {
 
   } catch (error) {
     console.error('❌ Webhook Error:', error);
-    // Jangan throw error ke next(error) agar Midtrans tidak retry terus menerus jika error coding
     res.status(200).json({ message: 'Error handled' }); 
   }
 }
