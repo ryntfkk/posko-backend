@@ -1,27 +1,37 @@
 const Order = require('./model');
 const Provider = require('../providers/model');
 
-// [UPDATE] Perbaikan listOrders agar Provider hanya melihat order miliknya
+// [UPDATE] Perbaikan listOrders agar mendukung mode Customer & Provider
 async function listOrders(req, res, next) {
   try {
     const { roles = [], userId } = req.user || {};
+    const { view } = req.query; // Baca parameter 'view' dari frontend ('customer' atau 'provider')
     
-    let filter = { userId }; // Default: Customer melihat ordernya sendiri
+    let filter = { userId }; // Default: Filter berdasarkan User ID (Mode Customer/Pembeli)
 
-    if (roles.includes('provider')) {
+    // Logika: Hanya ubah filter ke Provider ID JIKA view='provider' DAN user punya role provider
+    if (view === 'provider' && roles.includes('provider')) {
       // Cari ID Provider berdasarkan User ID
       const provider = await Provider.findOne({ userId });
+      
       if (provider) {
-        // Provider melihat order yang providerId-nya adalah dia
+        // Mode Provider: Melihat orderan yang masuk ke dia (sebagai penjual)
         filter = { providerId: provider._id };
+      } else {
+        // Jika role provider tapi datanya belum ada, return kosong atau error
+        return res.json({ messageKey: 'orders.list', data: [] });
       }
-    } else if (roles.includes('admin')) {
-      filter = {}; // Admin lihat semua
+    } 
+    
+    // Jika view='customer' (atau tidak dikirim), biarkan filter = { userId }
+    // Admin tetap bisa melihat semua jika diperlukan, tapi untuk keamanan sebaiknya spesifik
+    if (roles.includes('admin') && !view) {
+      filter = {}; 
     }
 
     const orders = await Order.find(filter)
       .populate('items.serviceId', 'name category iconUrl')
-      .populate('userId', 'fullName phoneNumber address location') // [PENTING] Provider butuh data customer
+      .populate('userId', 'fullName phoneNumber address location') 
       .populate({
         path: 'providerId',
         select: 'userId rating',
