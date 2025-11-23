@@ -1,11 +1,11 @@
 const Order = require('./model');
 const Provider = require('../providers/model');
 
-// [UPDATE] Perbaikan listOrders agar mendukung mode Customer & Provider
+// 1. LIST ALL ORDERS (Untuk tab "Pesanan Saya" Customer & history Provider)
 async function listOrders(req, res, next) {
   try {
     const { roles = [], userId } = req.user || {};
-    const { view } = req.query; // Baca parameter 'view' dari frontend ('customer' atau 'provider')
+    const { view } = req.query; // Baca parameter 'view' ('customer' atau 'provider')
     
     let filter = { userId }; // Default: Filter berdasarkan User ID (Mode Customer/Pembeli)
 
@@ -18,13 +18,11 @@ async function listOrders(req, res, next) {
         // Mode Provider: Melihat orderan yang masuk ke dia (sebagai penjual)
         filter = { providerId: provider._id };
       } else {
-        // Jika role provider tapi datanya belum ada, return kosong atau error
         return res.json({ messageKey: 'orders.list', data: [] });
       }
     } 
     
-    // Jika view='customer' (atau tidak dikirim), biarkan filter = { userId }
-    // Admin tetap bisa melihat semua jika diperlukan, tapi untuk keamanan sebaiknya spesifik
+    // Admin bisa melihat semua jika tidak ada view spesifik
     if (roles.includes('admin') && !view) {
       filter = {}; 
     }
@@ -40,39 +38,35 @@ async function listOrders(req, res, next) {
       .sort({ createdAt: -1 });
 
     const messageKey = 'orders.list';
-    res.json({ messageKey, message: req.t(messageKey), data: orders });
+    res.json({ messageKey, message: req.t ? req.t(messageKey) : 'List Orders', data: orders });
   } catch (error) {
     next(error);
   }
 }
 
+// 2. CREATE ORDER
 async function createOrder(req, res, next) {
   try {
     const userId = req.user?.userId;
     if (!userId) {
-      const messageKey = 'auth.unauthorized';
-      return res.status(401).json({ messageKey, message: req.t ? req.t(messageKey) : 'Unauthorized' });
+      return res.status(401).json({ message: 'Unauthorized' });
     }
 
-    // [PERBAIKAN] Tambahkan 'orderType' di sini agar dibaca dari Frontend
     const { providerId, items = [], totalAmount = 0, orderType } = req.body;
     
-    // [PERBAIKAN] Masukkan 'orderType' ke dalam object Order baru
     const order = new Order({ userId, providerId, items, totalAmount, orderType });
     
     await order.save();
-    const messageKey = 'orders.created';
-    res.status(201).json({ messageKey, message: req.t(messageKey), data: order });
+    res.status(201).json({ message: 'Pesanan berhasil dibuat', data: order });
   } catch (error) {
     next(error);
   }
 }
 
+// 3. GET ORDER BY ID
 async function getOrderById(req, res, next) {
   try {
     const { orderId } = req.params;
-    const userId = req.user.userId;
-
     // Cari order berdasarkan ID
     const order = await Order.findById(orderId)
       .populate('items.serviceId', 'name iconUrl') // Ambil detail service
@@ -80,56 +74,65 @@ async function getOrderById(req, res, next) {
       .populate({
          path: 'providerId',
          populate: { path: 'userId', select: 'fullName phoneNumber profilePictureUrl' }
-      });
+      })
+      .populate('userId', 'fullName phoneNumber address location profilePictureUrl'); // Tambahan info customer
 
     if (!order) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
     }
 
-    // Security: Pastikan yang akses adalah pemilik order atau provider yang terkait/admin
-    // (Sederhananya kita cek userId dulu)
-    if (order.userId.toString() !== userId && 
-        (!req.user.roles.includes('admin') && order.providerId?._id.toString() !== userId)) {
-       // return res.status(403).json({ message: 'Akses ditolak' });
-       // Opsional: Uncomment jika ingin strict security
-    }
-
-    res.json({ messageKey: 'orders.detail', data: order });
+    res.json({ message: 'Detail pesanan ditemukan', data: order });
   } catch (error) {
     next(error);
   }
 }
-// [FITUR BARU] Ambil daftar pesanan masuk untuk Mitra
+
+// 4. [PERBAIKAN] LIST INCOMING ORDERS (Untuk Dashboard Provider "Masuk")
 async function listIncomingOrders(req, res, next) {
   try {
     const userId = req.user.userId;
     
-    // 1. Cari Profile Provider dari User yang login
+    // a. Cari Data Provider & Services-nya
     const provider = await Provider.findOne({ userId });
     if (!provider) {
       return res.status(403).json({ message: 'Anda belum terdaftar sebagai Mitra.' });
     }
 
-    // 2. Cari Orderan yang Cocok
-    // - Basic Order: Status 'searching' (Broadcast ke semua mitra)
-    // - Direct Order: Ditujukan ke ID Mitra ini
+    // b. Ambil daftar ID Service yang dimiliki Provider (Hanya yang statusnya Active)
+    const myServiceIds = provider.services
+      .filter(s => s.isActive)
+      .map(s => s.serviceId);
+
+    // c. Query Order dengan Logika OR
     const orders = await Order.find({
       $or: [
-        { status: 'searching', orderType: 'basic' }, 
-        { providerId: provider._id, status: { $in: ['pending', 'searching', 'accepted'] } }
+        // KONDISI A: Basic Order (Broadcast ke yang punya skill sesuai)
+        { 
+          orderType: 'basic', 
+          status: { $in: ['pending', 'searching'] }, // Terima pending & searching
+          providerId: null, // Belum diambil siapapun
+          'items.serviceId': { $in: myServiceIds } // Filter skill
+        },
+
+        // KONDISI B: Direct Order (Khusus ditujukan ke Provider ini)
+        { 
+          providerId: provider._id, 
+          status: { $in: ['pending', 'searching', 'accepted', 'on_the_way', 'working', 'waiting_approval'] } 
+        }
       ]
     })
-    .populate('userId', 'fullName address profilePictureUrl') // Data Customer
-    .populate('items.serviceId', 'name category') // Data Layanan
-    .sort({ createdAt: -1 }); // Urutkan dari yang terbaru
+    // Populate data Customer & Service agar lengkap di Frontend
+    .populate('userId', 'fullName address location profilePictureUrl phoneNumber') 
+    .populate('items.serviceId', 'name category iconUrl')
+    .sort({ createdAt: -1 }); 
 
-    res.json({ messageKey: 'orders.incoming', data: orders });
+    res.json({ message: 'Daftar order masuk berhasil diambil', data: orders });
   } catch (error) {
     next(error);
   }
 }
 
-// [FITUR BARU] Mitra Menerima Pesanan
+// 5. ACCEPT ORDER
 async function acceptOrder(req, res, next) {
   try {
     const { orderId } = req.params;
@@ -157,7 +160,7 @@ async function acceptOrder(req, res, next) {
   }
 }
 
-// [UPDATE] Update Status dengan Logika Konfirmasi 2 Pihak
+// 6. UPDATE ORDER STATUS
 async function updateOrderStatus(req, res, next) {
   try {
     const { orderId } = req.params;
@@ -169,8 +172,6 @@ async function updateOrderStatus(req, res, next) {
 
     // Cek Role Pelaku
     const isCustomer = order.userId.toString() === userId;
-    
-    // Cek apakah user adalah provider dari order ini
     const provider = await Provider.findOne({ userId });
     const isProvider = order.providerId && provider && order.providerId.toString() === provider._id.toString();
 
@@ -182,7 +183,6 @@ async function updateOrderStatus(req, res, next) {
 
     // 1. Provider ingin menandai pekerjaan selesai
     if (status === 'completed' && isProvider) {
-        // Provider tidak bisa langsung 'completed', harus 'waiting_approval' dulu
         if (order.status !== 'working') {
             return res.status(400).json({ message: 'Hanya pesanan yang sedang dikerjakan yang bisa diselesaikan.' });
         }
@@ -209,7 +209,7 @@ async function updateOrderStatus(req, res, next) {
         return res.json({ message: `Status diubah menjadi ${status}`, data: order });
     }
 
-    // 4. Cancel (Bisa kedua pihak dengan syarat tertentu)
+    // 4. Cancel
     if (status === 'cancelled') {
         if (['completed', 'working'].includes(order.status)) {
             return res.status(400).json({ message: 'Pesanan tidak dapat dibatalkan pada tahap ini.' });
@@ -225,6 +225,7 @@ async function updateOrderStatus(req, res, next) {
     next(error);
   }
 }
+
 module.exports = { 
   listOrders, 
   createOrder, 
