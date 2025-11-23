@@ -1,27 +1,33 @@
 const Order = require('./model');
 const Provider = require('../providers/model');
 
+// [UPDATE] Perbaikan listOrders agar Provider hanya melihat order miliknya
 async function listOrders(req, res, next) {
   try {
     const { roles = [], userId } = req.user || {};
-    const isAdminOrProvider = roles.includes('admin') || roles.includes('provider');
     
-    if (!isAdminOrProvider && !userId) {
-      const messageKey = 'auth.unauthorized';
-      return res.status(401).json({ messageKey, message: req.t ? req.t(messageKey) : 'Unauthorized' });
+    let filter = { userId }; // Default: Customer melihat ordernya sendiri
+
+    if (roles.includes('provider')) {
+      // Cari ID Provider berdasarkan User ID
+      const provider = await Provider.findOne({ userId });
+      if (provider) {
+        // Provider melihat order yang providerId-nya adalah dia
+        filter = { providerId: provider._id };
+      }
+    } else if (roles.includes('admin')) {
+      filter = {}; // Admin lihat semua
     }
 
-    const filter = isAdminOrProvider ? {} : { userId };
-
-    // [PERBAIKAN] Tambahkan populate dan sort
     const orders = await Order.find(filter)
-      .populate('items.serviceId', 'name category iconUrl') // Ambil detail layanan (PENTING untuk UI)
+      .populate('items.serviceId', 'name category iconUrl')
+      .populate('userId', 'fullName phoneNumber address location') // [PENTING] Provider butuh data customer
       .populate({
         path: 'providerId',
         select: 'userId rating',
-        populate: { path: 'userId', select: 'fullName profilePictureUrl' } // Ambil detail mitra
+        populate: { path: 'userId', select: 'fullName profilePictureUrl' }
       })
-      .sort({ createdAt: -1 }); // Urutkan dari yang terbaru
+      .sort({ createdAt: -1 });
 
     const messageKey = 'orders.list';
     res.json({ messageKey, message: req.t(messageKey), data: orders });
@@ -140,10 +146,80 @@ async function acceptOrder(req, res, next) {
     next(error);
   }
 }
+
+// [UPDATE] Update Status dengan Logika Konfirmasi 2 Pihak
+async function updateOrderStatus(req, res, next) {
+  try {
+    const { orderId } = req.params;
+    const { status } = req.body; 
+    const userId = req.user.userId;
+
+    const order = await Order.findById(orderId);
+    if (!order) return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
+
+    // Cek Role Pelaku
+    const isCustomer = order.userId.toString() === userId;
+    
+    // Cek apakah user adalah provider dari order ini
+    const provider = await Provider.findOne({ userId });
+    const isProvider = order.providerId && provider && order.providerId.toString() === provider._id.toString();
+
+    if (!isCustomer && !isProvider) {
+        return res.status(403).json({ message: 'Anda tidak memiliki akses ke pesanan ini' });
+    }
+
+    // --- LOGIKA PERPINDAHAN STATUS ---
+
+    // 1. Provider ingin menandai pekerjaan selesai
+    if (status === 'completed' && isProvider) {
+        // Provider tidak bisa langsung 'completed', harus 'waiting_approval' dulu
+        if (order.status !== 'working') {
+            return res.status(400).json({ message: 'Hanya pesanan yang sedang dikerjakan yang bisa diselesaikan.' });
+        }
+        order.status = 'waiting_approval';
+        await order.save();
+        return res.json({ message: 'Pekerjaan ditandai selesai. Menunggu konfirmasi pelanggan.', data: order });
+    }
+
+    // 2. Customer mengonfirmasi penyelesaian
+    if (status === 'completed' && isCustomer) {
+        if (order.status !== 'waiting_approval') {
+            return res.status(400).json({ message: 'Belum ada permintaan penyelesaian dari mitra.' });
+        }
+        order.status = 'completed';
+        await order.save();
+        return res.json({ message: 'Pesanan selesai! Terima kasih.', data: order });
+    }
+
+    // 3. Status Provider Lainnya (On The Way, Working)
+    if (['on_the_way', 'working'].includes(status)) {
+        if (!isProvider) return res.status(403).json({ message: 'Hanya mitra yang bisa update status ini.' });
+        order.status = status;
+        await order.save();
+        return res.json({ message: `Status diubah menjadi ${status}`, data: order });
+    }
+
+    // 4. Cancel (Bisa kedua pihak dengan syarat tertentu)
+    if (status === 'cancelled') {
+        if (['completed', 'working'].includes(order.status)) {
+            return res.status(400).json({ message: 'Pesanan tidak dapat dibatalkan pada tahap ini.' });
+        }
+        order.status = 'cancelled';
+        await order.save();
+        return res.json({ message: 'Pesanan dibatalkan', data: order });
+    }
+
+    return res.status(400).json({ message: 'Status atau aksi tidak valid.' });
+
+  } catch (error) {
+    next(error);
+  }
+}
 module.exports = { 
   listOrders, 
   createOrder, 
   getOrderById, 
   listIncomingOrders,
-  acceptOrder         
+  acceptOrder,
+  updateOrderStatus
 };

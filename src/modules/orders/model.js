@@ -47,7 +47,8 @@ const orderSchema = new mongoose.Schema(
     ],
     status: {
       type: String,
-      enum: ['pending', 'searching', 'accepted', 'on_the_way', 'working', 'completed', 'cancelled'],
+      // [UPDATE] Menambahkan 'waiting_approval'
+      enum: ['pending', 'paid', 'searching', 'accepted', 'on_the_way', 'working', 'waiting_approval', 'completed', 'cancelled'],
       default: 'pending',
     },
     totalAmount: {
