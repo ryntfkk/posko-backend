@@ -7,21 +7,21 @@ const providerSchema = new mongoose.Schema(
       ref: 'User',
       required: true,
     },
-    // [UBAH DISINI] Services sekarang menyimpan detail harga & referensi ke Katalog
+    // Services menyimpan detail harga & referensi ke Katalog
     services: [
       {
         serviceId: {
           type: mongoose.Schema.Types.ObjectId,
-          ref: 'Service', // Terhubung ke model Service (Langkah 1)
+          ref: 'Service', 
           required: true,
         },
         price: {
           type: Number,
-          required: true, // INI ADALAH RATECARD (Harga khusus si Provider)
+          required: true, 
         },
         isActive: {
           type: Boolean,
-          default: true, // Provider bisa mematikan layanan ini sementara (misal: alat rusak)
+          default: true, 
         },
       },
     ],
@@ -34,6 +34,16 @@ const providerSchema = new mongoose.Schema(
       type: Boolean,
       default: false, 
     },
+    // [FITUR BARU] Jadwal Operasional
+    schedule: [
+      {
+        dayIndex: { type: Number, required: true }, // 0 = Minggu, 6 = Sabtu
+        dayName: { type: String, required: true },  // "Senin", "Selasa", dll
+        isOpen: { type: Boolean, default: true },
+        start: { type: String, default: '09:00' },  // Format HH:mm
+        end: { type: String, default: '17:00' }     // Format HH:mm
+      }
+    ]
   },
   { timestamps: true }
 );

@@ -1,5 +1,4 @@
 // File: src/modules/providers/validators.js
-// ⬇️ Pastikan baris ini ada! Ini yang mengimpor normalizeString
 const { addError, respondValidationErrors, normalizeString } = require('../../utils/validation');
 
 function validateCreateProvider(req, res, next) {
@@ -50,4 +49,41 @@ function validateCreateProvider(req, res, next) {
   return next();
 }
 
-module.exports = { validateCreateProvider };
+// [FITUR BARU] Validasi Update Jadwal
+function validateUpdateSchedule(req, res, next) {
+  const errors = [];
+  const body = req.body; // Ekspektasi: Array of ScheduleDay
+
+  if (!Array.isArray(body)) {
+    addError(errors, 'schedule', 'validation.schedule_array', 'Jadwal harus berupa array');
+    return respondValidationErrors(req, res, errors);
+  }
+
+  // Validasi setiap item jadwal
+  body.forEach((day, index) => {
+    if (typeof day.dayIndex !== 'number' || day.dayIndex < 0 || day.dayIndex > 6) {
+      addError(errors, `schedule[${index}].dayIndex`, 'validation.day_index_invalid', 'dayIndex harus angka 0-6');
+    }
+    if (!day.dayName) {
+      addError(errors, `schedule[${index}].dayName`, 'validation.day_name_required', 'dayName wajib diisi');
+    }
+    // Validasi format jam sederhana (Regex HH:mm)
+    const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
+    if (day.isOpen) {
+        if (!day.start || !timeRegex.test(day.start)) {
+            addError(errors, `schedule[${index}].start`, 'validation.start_invalid', 'Format jam mulai salah (HH:mm)');
+        }
+        if (!day.end || !timeRegex.test(day.end)) {
+            addError(errors, `schedule[${index}].end`, 'validation.end_invalid', 'Format jam selesai salah (HH:mm)');
+        }
+    }
+  });
+
+  if (errors.length) {
+    return respondValidationErrors(req, res, errors);
+  }
+
+  return next();
+}
+
+module.exports = { validateCreateProvider, validateUpdateSchedule };

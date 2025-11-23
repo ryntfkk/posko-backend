@@ -146,6 +146,7 @@ async function listProviders(req, res, next) {
         services: '$providerInfo.services',
         rating: '$providerInfo.rating',
         isOnline: '$providerInfo.isOnline',
+        schedule: '$providerInfo.schedule', // [FIX] Sertakan Jadwal di output list
         createdAt: '$providerInfo.createdAt',
         distance: '$distance' // Kirim balik jaraknya
       }
@@ -235,4 +236,30 @@ async function createProvider(req, res, next) {
   }
 }
 
-module.exports = { listProviders, getProviderById, createProvider };
+// [FITUR BARU] Update Jadwal Provider
+async function updateSchedule(req, res, next) {
+  try {
+    const userId = req.user.userId; // Dari token Auth
+    const newSchedule = req.body; // Array jadwal dari frontend
+
+    // Cari provider berdasarkan User ID yang login
+    const provider = await Provider.findOne({ userId });
+    if (!provider) {
+        return res.status(404).json({ message: 'Profil Mitra tidak ditemukan' });
+    }
+
+    // Update field schedule
+    provider.schedule = newSchedule;
+    await provider.save();
+
+    res.json({
+        message: 'Jadwal operasional berhasil diperbarui',
+        data: provider.schedule
+    });
+
+  } catch (error) {
+    next(error);
+  }
+}
+
+module.exports = { listProviders, getProviderById, createProvider, updateSchedule };
