@@ -3,10 +3,20 @@ const Service = require('./model');
 // GET /api/services (Public)
 async function listServices(req, res, next) {
   try {
-    // Ambil hanya yang statusnya Aktif
-    const services = await Service.find({ isActive: true });
+    const { category } = req.query; // 1. Ambil parameter category dari query string
+
+    // 2. Siapkan filter dasar (hanya yang aktif)
+    let filter = { isActive: true };
+
+    // 3. Jika ada category, tambahkan ke filter
+    if (category) {
+      // Menggunakan regex agar pencarian tidak case-sensitive (misal: "ac" cocok dengan "AC")
+      // Dan handle slug (jika category dikirim dalam bentuk slug seperti 'service-ac')
+      filter.category = { $regex: category.replace(/-/g, ' '), $options: 'i' };
+    }
+
+    const services = await Service.find(filter);
     
-    // Kita bisa gunakan message key umum atau buat baru
     res.json({ 
       message: 'Daftar layanan berhasil diambil', 
       data: services 
