@@ -1,9 +1,26 @@
+// src/modules/providers/controller.js
 const Provider = require('./model');
 const User = require('../../models/User');
 const Service = require('../services/model');
+const Order = require('../orders/model'); // [PENTING] Import Model Order
 
-// Helper untuk validasi ID MongoDB
 const { Types } = require('mongoose');
+
+// Helper: Ambil tanggal-tanggal yang sudah dibooking (Order Aktif)
+async function getBookedDates(providerId) {
+  const activeOrders = await Order.find({
+    providerId: providerId,
+    status: { $in: ['accepted', 'on_the_way', 'working'] }, // Status yang dianggap "Sibuk"
+    scheduledAt: { $gte: new Date() } // Hanya ambil yang hari ini/masa depan
+  }).select('scheduledAt');
+
+  // Kembalikan array tanggal (Start of Day)
+  return activeOrders.map(o => {
+      const d = new Date(o.scheduledAt);
+      d.setHours(0,0,0,0);
+      return d;
+  });
+}
 
 async function listProviders(req, res, next) {
   try {
@@ -123,7 +140,7 @@ async function listProviders(req, res, next) {
         services: '$providerInfo.services',
         rating: '$providerInfo.rating',
         isOnline: '$providerInfo.isOnline',
-        schedule: '$providerInfo.schedule', 
+        blockedDates: '$providerInfo.blockedDates', // [UPDATE] Tampilkan Blocked Dates
         createdAt: '$providerInfo.createdAt',
         distance: '$distance' 
       }
@@ -170,17 +187,24 @@ async function getProviderById(req, res, next) {
       return res.status(404).json({ message: 'Mitra tidak ditemukan' });
     }
 
+    // [BARU] Ambil juga tanggal yang sudah ter-booking oleh customer lain
+    const bookedDates = await getBookedDates(provider._id);
+
+    // Kirim data provider + bookedDates terpisah agar frontend bisa bedakan warna
+    // Kita convert object mongoose ke plain object dulu
+    const providerData = provider.toObject();
+    providerData.bookedDates = bookedDates;
+
     res.json({ 
       messageKey: 'providers.detail', 
       message: 'Detail mitra ditemukan', 
-      data: provider 
+      data: providerData
     });
   } catch (error) {
     next(error);
   }
 }
 
-// [BARU] Get My Provider Profile (Untuk Dashboard Mitra)
 async function getProviderMe(req, res, next) {
   try {
     const userId = req.user.userId;
@@ -191,9 +215,14 @@ async function getProviderMe(req, res, next) {
       return res.status(404).json({ message: 'Profil Mitra belum dibuat' });
     }
 
+    // [BARU] Ambil tanggal booked untuk dilihat sendiri oleh provider
+    const bookedDates = await getBookedDates(provider._id);
+    const providerData = provider.toObject();
+    providerData.bookedDates = bookedDates;
+
     res.json({
       message: 'Profil mitra ditemukan',
-      data: provider
+      data: providerData
     });
   } catch (error) {
     next(error);
@@ -227,22 +256,26 @@ async function createProvider(req, res, next) {
   }
 }
 
-async function updateSchedule(req, res, next) {
+// [BARU] Update Ketersediaan (Libur Manual)
+async function updateAvailability(req, res, next) {
   try {
     const userId = req.user.userId; 
-    const newSchedule = req.body; 
+    // Menerima array blockedDates: ["2024-12-25", "2024-12-31"]
+    const { blockedDates } = req.body; 
 
     const provider = await Provider.findOne({ userId });
     if (!provider) {
         return res.status(404).json({ message: 'Profil Mitra tidak ditemukan' });
     }
 
-    provider.schedule = newSchedule;
+    // Update blockedDates
+    // Pastikan input adalah array of date yang valid
+    provider.blockedDates = blockedDates;
     await provider.save();
 
     res.json({
-        message: 'Jadwal operasional berhasil diperbarui',
-        data: provider.schedule
+        message: 'Ketersediaan kalender berhasil diperbarui',
+        data: provider.blockedDates
     });
 
   } catch (error) {
@@ -250,4 +283,10 @@ async function updateSchedule(req, res, next) {
   }
 }
 
-module.exports = { listProviders, getProviderById, getProviderMe, createProvider, updateSchedule };
+module.exports = { 
+    listProviders, 
+    getProviderById, 
+    getProviderMe, 
+    createProvider, 
+    updateAvailability // Ganti updateSchedule jadi ini
+};
