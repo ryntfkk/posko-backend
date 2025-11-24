@@ -53,12 +53,10 @@ initSocket(server);
 
 const startServer = async () => {
   try {
-    // Koneksi Database
     await mongoose.connect(env.mongoUri);
     console.log('✅ Berhasil terhubung ke MongoDB');
 
-    // --- BAGIAN PENTING UNTUK RAILWAY ---
-    // Tambahkan '0.0.0.0' agar bisa diakses dari luar container
+    // 👇 PERHATIKAN BAGIAN INI: Tambahkan '0.0.0.0'
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Server berjalan di port ${PORT}`);
     });
@@ -66,10 +64,9 @@ const startServer = async () => {
     server.on('error', (err) => {
       console.error('❌ Server gagal diinisialisasi:', err);
     });
-
   } catch (err) {
     console.error('❌ Gagal terhubung ke MongoDB:', err);
-    process.exit(1); // Matikan proses jika DB gagal
+    process.exit(1);
   }
 };
 
