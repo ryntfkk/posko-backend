@@ -19,10 +19,9 @@ const errorHandler = require('./middlewares/errorHandler');
 const app = express();
 const server = http.createServer(app);
 
-// Railway memberikan PORT secara otomatis di process.env.PORT
+// Gunakan PORT dari Railway
 const PORT = process.env.PORT || 3000;
 
-// Izinkan akses dari mana saja (Penting untuk Demo)
 app.use(cors({
   origin: '*',
   credentials: true
@@ -31,9 +30,10 @@ app.use(cors({
 app.use(i18nMiddleware);
 app.use(express.json());
 
-// Health Check Endpoint (Penting agar Railway tahu app hidup)
+// Health Check (Penting!)
 app.get('/', (req, res) => {
-  res.status(200).send('Posko Backend API is Running!');
+  const dbStatus = mongoose.connection.readyState === 1 ? 'Connected' : 'Connecting/Disconnected';
+  res.status(200).send(`Posko Backend Running! DB: ${dbStatus}`);
 });
 
 // Register Routes
@@ -45,29 +45,25 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/reviews', reviewRoutes);
 app.use('/api/services', serviceRoutes);
 
-// Error Handler
 app.use(errorHandler);
-
-// Inisialisasi Socket.io
 initSocket(server);
 
-const startServer = async () => {
-  try {
-    await mongoose.connect(env.mongoUri);
-    console.log('✅ Berhasil terhubung ke MongoDB');
+// --- PERUBAHAN PENTING DI SINI ---
 
-    // 👇 PERHATIKAN BAGIAN INI: Tambahkan '0.0.0.0'
-    server.listen(PORT, '0.0.0.0', () => {
-      console.log(`🚀 Server berjalan di port ${PORT}`);
-    });
+// 1. Nyalakan Server SEGERA (Jangan tunggu DB)
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Server SIAP & berjalan di port ${PORT}`);
+});
 
-    server.on('error', (err) => {
-      console.error('❌ Server gagal diinisialisasi:', err);
-    });
-  } catch (err) {
+// 2. Koneksi Database di Latar Belakang
+mongoose.connect(env.mongoUri)
+  .then(() => console.log('✅ Berhasil terhubung ke MongoDB (Menyusul)'))
+  .catch((err) => {
     console.error('❌ Gagal terhubung ke MongoDB:', err);
-    process.exit(1);
-  }
-};
+    // Jangan process.exit(1) agar server tetap hidup untuk debugging
+  });
 
-startServer();
+// Handle error server jika ada
+server.on('error', (err) => {
+  console.error('❌ Server Error:', err);
+});
