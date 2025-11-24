@@ -22,6 +22,7 @@ const server = http.createServer(app);
 // Gunakan PORT dari Railway
 const PORT = process.env.PORT || 3000;
 
+// Izinkan akses dari mana saja
 app.use(cors({
   origin: '*',
   credentials: true
@@ -30,10 +31,11 @@ app.use(cors({
 app.use(i18nMiddleware);
 app.use(express.json());
 
-// --- HEALTH CHECK SEDERHANA ---
+// --- HEALTH CHECK ---
+// Ini endpoint yang dicari Railway
 app.get('/', (req, res) => {
-  console.log(`[${new Date().toISOString()}] 🔔 PING DITERIMA!`);
-  res.status(200).send('Posko Backend OK');
+  console.log('🔔 PING! Railway Health Check Masuk!');
+  res.status(200).send('Posko Backend is Running!');
 });
 
 // Register Routes
@@ -49,19 +51,19 @@ app.use(errorHandler);
 initSocket(server);
 
 const startServer = async () => {
-  // 1. NYALAKAN SERVER (Tanpa Host Binding Spesifik)
-  // Hapus '0.0.0.0' agar support IPv4 & IPv6
-  server.listen(PORT, () => {
-    console.log(`✅ SERVER AKTIF (Mode Auto-Binding) di Port ${PORT}`);
+  // [PERBAIKAN FINAL]
+  // 1. Gunakan '0.0.0.0' agar bisa diakses dari luar container
+  // 2. Server menyala DULUAN sebelum Database, biar Railway tidak timeout
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Server SIAP (0.0.0.0) di Port ${PORT}`);
+    console.log('⏳ Menunggu koneksi Database...');
   });
 
-  // 2. Koneksi Database (Non-Blocking)
   try {
     await mongoose.connect(env.mongoUri);
     console.log('✅ Database Terhubung');
   } catch (err) {
     console.error('❌ Database Gagal:', err.message);
-    // Server tetap jalan walau DB error, agar bisa dicek log-nya
   }
 };
 
