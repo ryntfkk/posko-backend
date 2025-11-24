@@ -77,5 +77,36 @@ const startServer = async () => {
 server.on('error', (err) => {
   console.error('❌ Server Error:', err);
 });
+// Log event shutdown supaya tahu kenapa Railway menghentikan container
+const shutdown = (signal) => {
+  console.warn(`⚠️ Menerima sinyal ${signal}. Menutup server dengan rapi...`);
+
+  server.close(() => {
+    console.log('✅ Server ditutup. Keluar dari proses.');
+    process.exit(0);
+  });
+
+  // Paksa keluar jika ada permintaan aktif yang tertahan
+  setTimeout(() => {
+    console.error('⏱️ Shutdown paksa karena ada proses yang menggantung.');
+    process.exit(1);
+  }, 10_000).unref();
+};
+
+['SIGTERM', 'SIGINT'].forEach((signal) => {
+  process.on(signal, () => shutdown(signal));
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ Unhandled Promise Rejection terdeteksi:', reason);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('⚠️ Koneksi MongoDB terputus. Railway bisa saja menandai healthcheck gagal.');
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('❌ Error koneksi MongoDB:', err);
+});
 
 startServer();
