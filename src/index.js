@@ -19,9 +19,10 @@ const errorHandler = require('./middlewares/errorHandler');
 const app = express();
 const server = http.createServer(app);
 
-// Gunakan PORT dari Railway
+// Railway memberikan PORT secara otomatis di process.env.PORT
 const PORT = process.env.PORT || 3000;
 
+// Izinkan akses dari mana saja
 app.use(cors({
   origin: '*',
   credentials: true
@@ -30,10 +31,9 @@ app.use(cors({
 app.use(i18nMiddleware);
 app.use(express.json());
 
-// Health Check (Penting!)
+// Health Check Endpoint (Wajib ada di root '/')
 app.get('/', (req, res) => {
-  const dbStatus = mongoose.connection.readyState === 1 ? 'Connected' : 'Connecting/Disconnected';
-  res.status(200).send(`Posko Backend Running! DB: ${dbStatus}`);
+  res.status(200).send('Posko Backend API is Running!');
 });
 
 // Register Routes
@@ -48,22 +48,15 @@ app.use('/api/services', serviceRoutes);
 app.use(errorHandler);
 initSocket(server);
 
-// --- PERUBAHAN PENTING DI SINI ---
-
-// 1. Nyalakan Server SEGERA (Jangan tunggu DB)
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server SIAP & berjalan di port ${PORT}`);
+// --- BAGIAN YANG DIPERBAIKI ---
+// Hapus '0.0.0.0' agar Node.js bisa menerima IPv4 DAN IPv6
+server.listen(PORT, () => {
+  console.log(`🚀 Server berjalan di port ${PORT}`);
 });
 
-// 2. Koneksi Database di Latar Belakang
+// Koneksi Database di Latar Belakang (Non-blocking)
 mongoose.connect(env.mongoUri)
-  .then(() => console.log('✅ Berhasil terhubung ke MongoDB (Menyusul)'))
-  .catch((err) => {
-    console.error('❌ Gagal terhubung ke MongoDB:', err);
-    // Jangan process.exit(1) agar server tetap hidup untuk debugging
-  });
+  .then(() => console.log('✅ Berhasil terhubung ke MongoDB'))
+  .catch((err) => console.error('❌ Gagal koneksi DB:', err));
 
-// Handle error server jika ada
-server.on('error', (err) => {
-  console.error('❌ Server Error:', err);
-});
+server.on('error', (err) => console.error('❌ Server Error:', err));
