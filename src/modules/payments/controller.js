@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const Payment = require('./model');
 const Order = require('../orders/model');
 const snap = require('../../utils/midtrans');
+const { checkMidtransConfig } = require('../../utils/midtransConfig');
 
 async function listPayments(req, res, next) {
   try {
@@ -15,6 +16,14 @@ async function listPayments(req, res, next) {
 
 async function createPayment(req, res, next) {
   try {
+        const { isConfigured, missingKeys } = checkMidtransConfig();
+    if (!isConfigured) {
+      return res.status(503).json({
+        message: 'Payment service is temporarily unavailable due to incomplete configuration.',
+        details: { missingKeys },
+      });
+    }
+    
     const { orderId } = req.body;
 
     // 1. Ambil Data Order
