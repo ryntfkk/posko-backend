@@ -49,9 +49,9 @@ const startServer = async () => {
     await mongoose.connect(env.mongoUri);
     console.log('✅ Berhasil terhubung ke MongoDB');
 
-    // [PERBAIKAN] Gunakan server.listen, BUKAN app.listen
-    server.listen(PORT, () => {
-      console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
+    // [PERBAIKAN DI SINI] Tambahkan '0.0.0.0' setelah PORT
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 Server berjalan di port ${PORT}`);
     });
 
     server.on('error', (err) => {
