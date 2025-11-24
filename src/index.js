@@ -1,11 +1,10 @@
-// src/index.js
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const http = require('http'); // [TAMBAHAN]
+const http = require('http');
 const env = require('./config/env');
 const { i18nMiddleware } = require('./config/i18n');
-const { initSocket } = require('./modules/chat/socket'); // [TAMBAHAN]
+const { initSocket } = require('./modules/chat/socket');
 
 // Import Routes
 const reviewRoutes = require('./modules/reviews/routes');
@@ -18,19 +17,26 @@ const chatRoutes = require('./modules/chat/routes');
 const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
-const server = http.createServer(app); // [TAMBAHAN] Bungkus app dengan HTTP Server
+const server = http.createServer(app);
 
-const PORT = env.port;
+// Railway memberikan PORT secara otomatis di process.env.PORT
+const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// Izinkan akses dari mana saja (Penting untuk Demo)
+app.use(cors({
+  origin: '*',
+  credentials: true
+}));
+
 app.use(i18nMiddleware);
 app.use(express.json());
 
+// Health Check Endpoint (Penting agar Railway tahu app hidup)
 app.get('/', (req, res) => {
-  const messageKey = 'app.running';
-  res.send(req.t(messageKey));
+  res.status(200).send('Posko Backend API is Running!');
 });
 
+// Register Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/providers', providerRoutes);
@@ -39,17 +45,20 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/reviews', reviewRoutes);
 app.use('/api/services', serviceRoutes);
 
+// Error Handler
 app.use(errorHandler);
 
-// [TAMBAHAN] Inisialisasi Socket.io
+// Inisialisasi Socket.io
 initSocket(server);
 
 const startServer = async () => {
   try {
+    // Koneksi Database
     await mongoose.connect(env.mongoUri);
     console.log('✅ Berhasil terhubung ke MongoDB');
 
-    // [PERBAIKAN DI SINI] Tambahkan '0.0.0.0' setelah PORT
+    // --- BAGIAN PENTING UNTUK RAILWAY ---
+    // Tambahkan '0.0.0.0' agar bisa diakses dari luar container
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Server berjalan di port ${PORT}`);
     });
@@ -57,9 +66,10 @@ const startServer = async () => {
     server.on('error', (err) => {
       console.error('❌ Server gagal diinisialisasi:', err);
     });
+
   } catch (err) {
     console.error('❌ Gagal terhubung ke MongoDB:', err);
-    process.exit(1);
+    process.exit(1); // Matikan proses jika DB gagal
   }
 };
 
