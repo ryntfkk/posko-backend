@@ -29,21 +29,18 @@ const providerSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
-    // Status Online/Offline untuk menerima orderan
+    // Status Online/Offline global (misal untuk mematikan akun sementara)
     isOnline: {
       type: Boolean,
-      default: false, 
+      default: true, 
     },
-    // [FITUR BARU] Jadwal Operasional
-    schedule: [
-      {
-        dayIndex: { type: Number, required: true }, // 0 = Minggu, 6 = Sabtu
-        dayName: { type: String, required: true },  // "Senin", "Selasa", dll
-        isOpen: { type: Boolean, default: true },
-        start: { type: String, default: '09:00' },  // Format HH:mm
-        end: { type: String, default: '17:00' }     // Format HH:mm
-      }
-    ]
+    // [FITUR BARU] Daftar Tanggal Libur / Tidak Tersedia (Manual Block)
+    // Format penyimpanan di MongoDB: ISODate("2024-12-25T00:00:00.000Z")
+    blockedDates: {
+      type: [Date],
+      default: [],
+      index: true
+    }
   },
   { timestamps: true }
 );

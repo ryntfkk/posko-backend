@@ -8,8 +8,11 @@ const router = express.Router();
 // GET /api/providers/ (List semua - Public)
 router.get('/', controller.listProviders);
 
+// [BARU] GET /api/providers/me (Profil Saya - Private Provider)
+// Wajib ditaruh SEBELUM /:id
+router.get('/me', authenticate, controller.getProviderMe);
+
 // PUT /api/providers/schedule (Update Jadwal - Private Provider)
-// Wajib ditaruh SEBELUM /:id agar tidak dianggap sebagai ID "schedule"
 router.put('/schedule', authenticate, validateUpdateSchedule, controller.updateSchedule);
 
 // GET /api/providers/:id (Detail satu provider - Public)

@@ -19,25 +19,21 @@ async function listProviders(req, res, next) {
 
     const pipeline = [];
 
-    // ---------------------------------------------------------
-    // 1. GEO-SPATIAL FILTER (Wajib di urutan pertama jika ada lat/lng)
-    // ---------------------------------------------------------
+    // 1. GEO-SPATIAL FILTER
     if (lat && lng) {
       pipeline.push({
         $geoNear: {
           near: { 
             type: "Point", 
-            coordinates: [parseFloat(lng), parseFloat(lat)] // [Longitude, Latitude]
+            coordinates: [parseFloat(lng), parseFloat(lat)] 
           },
-          distanceField: "distance", // Output jarak dalam meter
-          maxDistance: 20000, // Cari radius maks 20 KM
+          distanceField: "distance", 
+          maxDistance: 20000, 
           spherical: true,
-          // Filter awal: Hanya User yang role-nya provider & aktif
           query: { roles: 'provider', status: 'active' } 
         }
       });
     } else {
-      // Jika tidak ada lokasi, ambil semua provider aktif (tanpa hitung jarak)
       pipeline.push({ 
         $match: { 
           roles: 'provider',
@@ -46,25 +42,18 @@ async function listProviders(req, res, next) {
       });
     }
 
-    // ---------------------------------------------------------
-    // 2. RELASI KE DATA PROVIDER (Lookup ke collection 'providers')
-    // ---------------------------------------------------------
+    // 2. RELASI KE DATA PROVIDER
     pipeline.push({
       $lookup: {
-        from: 'providers', // Nama collection di DB (lowercase + s)
+        from: 'providers', 
         localField: '_id',
         foreignField: 'userId',
         as: 'providerInfo'
       }
     });
-    
-    // Ubah array providerInfo menjadi object (Hapus user yang tidak punya data provider)
     pipeline.push({ $unwind: '$providerInfo' });
 
-    // ---------------------------------------------------------
-    // 3. RELASI KE LAYANAN (Untuk Filter Kategori & Search)
-    // ---------------------------------------------------------
-    // Kita perlu detail layanan (nama, kategori) untuk filter
+    // 3. RELASI KE LAYANAN
     pipeline.push({
       $lookup: {
         from: 'services',
@@ -74,12 +63,9 @@ async function listProviders(req, res, next) {
       }
     });
 
-    // ---------------------------------------------------------
-    // 4. LOGIKA FILTER (Search & Category)
-    // ---------------------------------------------------------
+    // 4. LOGIKA FILTER
     const matchConditions = [];
 
-    // A. Filter Kategori (misal: "ac" -> cocokkan dengan kategori layanan)
     if (category) {
       const categoryRegex = new RegExp(category.replace(/-/g, ' '), 'i');
       matchConditions.push({
@@ -87,7 +73,6 @@ async function listProviders(req, res, next) {
       });
     }
 
-    // B. Filter Search (Cari Nama Mitra ATAU Nama Layanan ATAU Kota)
     if (search) {
       const searchRegex = new RegExp(search, 'i');
       matchConditions.push({
@@ -99,40 +84,33 @@ async function listProviders(req, res, next) {
       });
     }
 
-    // Terapkan filter jika ada
     if (matchConditions.length > 0) {
       pipeline.push({
         $match: { $and: matchConditions }
       });
     }
 
-    // ---------------------------------------------------------
     // 5. SORTING & PAGINATION
-    // ---------------------------------------------------------
     let sortStage = {};
     if (sortBy === 'rating') {
       sortStage = { 'providerInfo.rating': -1 };
     } else if (sortBy === 'distance' && lat && lng) {
-      sortStage = { distance: 1 }; // Jarak terdekat
+      sortStage = { distance: 1 }; 
     } else {
-      sortStage = { createdAt: -1 }; // Terbaru
+      sortStage = { createdAt: -1 }; 
     }
 
     pipeline.push({ $sort: sortStage });
     
-    // Pagination
     const skip = (parseInt(page) - 1) * parseInt(limit);
     pipeline.push({ $skip: skip });
     pipeline.push({ $limit: parseInt(limit) });
 
-    // ---------------------------------------------------------
-    // 6. PROJECTION (Format Output)
-    // ---------------------------------------------------------
-    // Membentuk JSON agar strukturnya mirip populate Mongoose biasa
+    // 6. PROJECTION
     pipeline.push({
       $project: {
-        _id: '$providerInfo._id', // Gunakan ID Provider sebagai ID utama
-        userId: {                 // Masukkan detail user ke dalam properti userId
+        _id: '$providerInfo._id', 
+        userId: {                 
           _id: '$_id',
           fullName: '$fullName',
           email: '$email',
@@ -142,22 +120,17 @@ async function listProviders(req, res, next) {
           bio: '$bio',
           phoneNumber: '$phoneNumber'
         },
-        // Ambil services dari providerInfo
         services: '$providerInfo.services',
         rating: '$providerInfo.rating',
         isOnline: '$providerInfo.isOnline',
-        schedule: '$providerInfo.schedule', // [FIX] Sertakan Jadwal di output list
+        schedule: '$providerInfo.schedule', 
         createdAt: '$providerInfo.createdAt',
-        distance: '$distance' // Kirim balik jaraknya
+        distance: '$distance' 
       }
     });
 
-    // Jalankan Pipeline
     const providers = await User.aggregate(pipeline);
 
-    // [PENTING] Populate detail Services (Nama & Icon) secara manual
-    // Karena aggregation di atas hanya mengembalikan ID services, kita perlu
-    // memanggil populate lagi agar Frontend bisa menampilkan ikon/nama layanan.
     await Provider.populate(providers, {
       path: 'services.serviceId',
       select: 'name category iconUrl basePrice',
@@ -179,7 +152,6 @@ async function getProviderById(req, res, next) {
   try {
     const { id } = req.params;
 
-    // Validasi format ID sebelum query agar tidak server error
     if (!Types.ObjectId.isValid(id)) {
       return res.status(404).json({ message: 'Mitra tidak ditemukan' });
     }
@@ -208,6 +180,26 @@ async function getProviderById(req, res, next) {
   }
 }
 
+// [BARU] Get My Provider Profile (Untuk Dashboard Mitra)
+async function getProviderMe(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const provider = await Provider.findOne({ userId })
+      .populate('services.serviceId', 'name category iconUrl');
+
+    if (!provider) {
+      return res.status(404).json({ message: 'Profil Mitra belum dibuat' });
+    }
+
+    res.json({
+      message: 'Profil mitra ditemukan',
+      data: provider
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 async function createProvider(req, res, next) {
   try {
     const { userId, services = [] } = req.body;
@@ -220,7 +212,6 @@ async function createProvider(req, res, next) {
     const provider = new Provider({ userId, services });
     await provider.save();
     
-    // Update role user
     await User.findByIdAndUpdate(userId, { 
         $addToSet: { roles: 'provider' },
         activeRole: 'provider' 
@@ -236,19 +227,16 @@ async function createProvider(req, res, next) {
   }
 }
 
-// [FITUR BARU] Update Jadwal Provider
 async function updateSchedule(req, res, next) {
   try {
-    const userId = req.user.userId; // Dari token Auth
-    const newSchedule = req.body; // Array jadwal dari frontend
+    const userId = req.user.userId; 
+    const newSchedule = req.body; 
 
-    // Cari provider berdasarkan User ID yang login
     const provider = await Provider.findOne({ userId });
     if (!provider) {
         return res.status(404).json({ message: 'Profil Mitra tidak ditemukan' });
     }
 
-    // Update field schedule
     provider.schedule = newSchedule;
     await provider.save();
 
@@ -262,4 +250,4 @@ async function updateSchedule(req, res, next) {
   }
 }
 
-module.exports = { listProviders, getProviderById, createProvider, updateSchedule };
+module.exports = { listProviders, getProviderById, getProviderMe, createProvider, updateSchedule };

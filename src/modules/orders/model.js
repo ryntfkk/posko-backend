@@ -1,5 +1,13 @@
 const mongoose = require('mongoose');
 
+const orderItemSchema = new mongoose.Schema({
+  serviceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Service', required: true },
+  name: { type: String, required: true },
+  quantity: { type: Number, default: 1 },
+  price: { type: Number, required: true },
+  note: { type: String }
+});
+
 const orderSchema = new mongoose.Schema(
   {
     userId: {
@@ -18,47 +26,28 @@ const orderSchema = new mongoose.Schema(
       ref: 'Provider',
       default: null,
     },
-    // [UBAH DISINI] Struktur items diperkaya
-    items: [
-      {
-        serviceId: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: 'Service',
-          required: true // Wajib ada ID layanannya
-        },
-        name: { 
-          type: String, 
-          required: true 
-        },
-        quantity: { 
-          type: Number, 
-          required: true, 
-          min: 1 
-        },
-        price: { 
-          type: Number, 
-          required: true // Harga per item saat deal
-        },
-        note: {
-          type: String,
-          default: ''
-        }
-      },
-    ],
+    items: [orderItemSchema],
     status: {
       type: String,
-      // [UPDATE] Menambahkan 'waiting_approval'
-      enum: ['pending', 'paid', 'searching', 'accepted', 'on_the_way', 'working', 'waiting_approval', 'completed', 'cancelled'],
+      enum: ['pending', 'paid', 'searching', 'accepted', 'on_the_way', 'working', 'waiting_approval', 'completed', 'cancelled', 'failed'],
       default: 'pending',
     },
     totalAmount: {
       type: Number,
       required: true,
     },
+    // [FITUR BARU] Tanggal Kunjungan Wajib Diisi
+    scheduledAt: {
+      type: Date,
+      required: [true, 'Tanggal kunjungan (scheduledAt) wajib diisi'],
+      index: true
+    },
     rejectedByProviders: [{ 
         type: mongoose.Schema.Types.ObjectId, 
         ref: 'Provider' 
     }],
+    paymentId: { type: String },
+    snapToken: { type: String }
   },
   { timestamps: true }
 );

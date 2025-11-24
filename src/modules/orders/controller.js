@@ -39,7 +39,7 @@ async function listOrders(req, res, next) {
   }
 }
 
-// 2. CREATE ORDER
+// 2. CREATE ORDER (DENGAN VALIDASI JADWAL)
 async function createOrder(req, res, next) {
   try {
     const userId = req.user?.userId;
@@ -48,6 +48,56 @@ async function createOrder(req, res, next) {
     }
 
     const { providerId, items = [], totalAmount = 0, orderType } = req.body;
+
+    // --- [UPDATE] VALIDASI JADWAL MITRA (Khusus Direct Order) ---
+    if (orderType === 'direct') {
+        if (!providerId) {
+            return res.status(400).json({ message: 'Provider ID wajib untuk Direct Order' });
+        }
+
+        const provider = await Provider.findById(providerId);
+        if (!provider) {
+            return res.status(404).json({ message: 'Mitra tidak ditemukan atau tidak aktif.' });
+        }
+
+        // Logika Cek Hari & Jam (WIB / UTC+7)
+        // Kita gunakan toLocaleString untuk memastikan waktu sesuai zona waktu Indonesia
+        const now = new Date();
+        const wibString = now.toLocaleString("en-US", { timeZone: "Asia/Jakarta" });
+        const wibDate = new Date(wibString);
+
+        const currentDayIndex = wibDate.getDay(); // 0 = Minggu, 1 = Senin, dst.
+        
+        // Format jam saat ini menjadi "HH:mm" (misal: 14:30) untuk perbandingan string
+        const currentHours = wibDate.getHours().toString().padStart(2, '0');
+        const currentMinutes = wibDate.getMinutes().toString().padStart(2, '0');
+        const currentTimeStr = `${currentHours}:${currentMinutes}`;
+
+        // Cek jadwal di database provider
+        if (provider.schedule && provider.schedule.length > 0) {
+            const todaySchedule = provider.schedule.find(s => s.dayIndex === currentDayIndex);
+
+            // Jika jadwal hari ini ditemukan
+            if (todaySchedule) {
+                // 1. Cek apakah Toko Tutup Hari Ini
+                if (!todaySchedule.isOpen) {
+                    return res.status(400).json({
+                        message: `Gagal membuat pesanan. Mitra tutup pada hari ini (${todaySchedule.dayName}).`
+                    });
+                }
+
+                // 2. Cek Jam Operasional (Start - End)
+                // Asumsi format di DB "09:00" dan "17:00"
+                if (currentTimeStr < todaySchedule.start || currentTimeStr > todaySchedule.end) {
+                     return res.status(400).json({
+                        message: `Mitra sedang tutup. Jam operasional hari ini: ${todaySchedule.start} - ${todaySchedule.end} WIB.`
+                    });
+                }
+            }
+        }
+    }
+    // -------------------------------------------------------------
+
     const order = new Order({ userId, providerId, items, totalAmount, orderType });
     
     await order.save();
@@ -79,7 +129,7 @@ async function getOrderById(req, res, next) {
   }
 }
 
-// 4. [PERBAIKAN] LIST INCOMING ORDERS
+// 4. LIST INCOMING ORDERS
 // Menampilkan order di tab "Masuk" Provider
 async function listIncomingOrders(req, res, next) {
   try {
@@ -107,7 +157,7 @@ async function listIncomingOrders(req, res, next) {
         // KONDISI B: Direct Order (Khusus Mitra Ini)
         { 
           providerId: provider._id,
-          // [FIX] Tampilkan status 'paid' agar Provider bisa konfirmasi (Terima/Tolak)
+          // Tampilkan status 'paid' agar Provider bisa konfirmasi
           status: { $in: ['paid'] } 
         }
       ]
@@ -122,7 +172,7 @@ async function listIncomingOrders(req, res, next) {
   }
 }
 
-// 5. [PERBAIKAN] ACCEPT ORDER
+// 5. ACCEPT ORDER
 async function acceptOrder(req, res, next) {
   try {
     const { orderId } = req.params;
@@ -134,8 +184,7 @@ async function acceptOrder(req, res, next) {
     const order = await Order.findById(orderId);
     if (!order) return res.status(404).json({ message: 'Pesanan tidak ditemukan.' });
 
-    // [FIX] Izinkan provider menerima order yang statusnya 'paid' (Direct) atau 'searching' (Basic)
-    // 'pending' diizinkan jika Anda mau fitur COD kedepannya, tapi standard flow payment gateway adalah 'paid'
+    // Izinkan provider menerima order yang statusnya 'paid' (Direct) atau 'searching' (Basic)
     if (!['searching', 'pending', 'paid'].includes(order.status)) {
       return res.status(400).json({ message: 'Pesanan ini sudah tidak tersedia atau sudah diambil.' });
     }
