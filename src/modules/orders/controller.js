@@ -47,10 +47,19 @@ async function createOrder(req, res, next) {
       return res.status(401).json({ message: 'Unauthorized' });
     }
 
-    // --- [UPDATE] Ambil scheduledAt dari body (sudah berupa objek Date dari validator) ---
-    const { providerId, items = [], totalAmount = 0, orderType, scheduledAt } = req.body;
+    const { 
+      providerId, 
+      items = [], 
+      totalAmount = 0, 
+      orderType, 
+      scheduledAt,
+      // --- [UPDATE] Ambil field baru ---
+      shippingAddress,
+      location 
+      // ---------------------------------
+    } = req.body;
 
-    // --- [UPDATE] VALIDASI JADWAL MITRA (Khusus Direct Order) ---
+    // --- LOGIKA PERBAIKAN: Gunakan scheduledAt untuk validasi ---
     if (orderType === 'direct') {
         if (!providerId) {
             return res.status(400).json({ message: 'Provider ID wajib untuk Direct Order' });
@@ -61,10 +70,7 @@ async function createOrder(req, res, next) {
             return res.status(404).json({ message: 'Mitra tidak ditemukan atau tidak aktif.' });
         }
         
-        // --- LOGIKA PERBAIKAN: Gunakan scheduledAt untuk validasi ---
-        
         // 1. Dapatkan tanggal dan waktu kunjungan dalam zona waktu WIB/Jakarta
-        // Kita gunakan toLocaleString untuk memastikan konversi waktu sesuai zona waktu
         const scheduledWIBString = scheduledAt.toLocaleString("en-US", { timeZone: "Asia/Jakarta" });
         const scheduledWIBDate = new Date(scheduledWIBString);
 
@@ -110,8 +116,17 @@ async function createOrder(req, res, next) {
     }
     // -------------------------------------------------------------
 
-    // --- [UPDATE] Simpan scheduledAt yang sudah divalidasi ---
-    const order = new Order({ userId, providerId, items, totalAmount, orderType, scheduledAt });
+    // --- [UPDATE] Masukkan semua field ke Order Baru ---
+    const order = new Order({ 
+      userId, 
+      providerId, 
+      items, 
+      totalAmount, 
+      orderType, 
+      scheduledAt,
+      shippingAddress, // Field baru
+      location         // Field baru
+    });
     
     await order.save();
     res.status(201).json({ message: 'Pesanan berhasil dibuat', data: order });
@@ -131,7 +146,8 @@ async function getOrderById(req, res, next) {
          path: 'providerId',
          populate: { path: 'userId', select: 'fullName phoneNumber profilePictureUrl' }
       })
-      .populate('userId', 'fullName phoneNumber address location profilePictureUrl');
+      // Tidak perlu populate address/location user lagi, karena sudah ada di order document
+      .populate('userId', 'fullName phoneNumber profilePictureUrl'); 
 
     if (!order) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
@@ -177,7 +193,7 @@ async function listIncomingOrders(req, res, next) {
     })
     .populate('userId', 'fullName address location profilePictureUrl phoneNumber') 
     .populate('items.serviceId', 'name category iconUrl')
-    .sort({ scheduledAt: 1 }); // [PERBAIKAN] Urutkan berdasarkan tanggal kunjungan
+    .sort({ scheduledAt: 1 }); // Urutkan berdasarkan tanggal kunjungan
 
     res.json({ message: 'Daftar order masuk berhasil diambil', data: orders });
   } catch (error) {

@@ -36,12 +36,33 @@ const orderSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
-    // [FITUR BARU] Tanggal Kunjungan Wajib Diisi
+    // Tanggal Kunjungan Wajib Diisi
     scheduledAt: {
       type: Date,
       required: [true, 'Tanggal kunjungan (scheduledAt) wajib diisi'],
       index: true
     },
+    // --- [UPDATE BARU] Simpan Alamat dan Lokasi dari Request Frontend ---
+    shippingAddress: {
+      province: { type: String },
+      district: { type: String },
+      city: { type: String },
+      village: { type: String },
+      postalCode: { type: String },
+      detail: { type: String },
+    },
+    location: {
+      type: {
+        type: String,
+        enum: ['Point'],
+        default: 'Point',
+      },
+      coordinates: {
+        type: [Number],
+        default: [0, 0],
+      },
+    },
+    // -----------------------------------------------------------------------
     rejectedByProviders: [{ 
         type: mongoose.Schema.Types.ObjectId, 
         ref: 'Provider' 

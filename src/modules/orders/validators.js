@@ -1,4 +1,3 @@
-// src/modules/orders/validators.js
 const { addError, respondValidationErrors, normalizeString } = require('../../utils/validation');
 
 function validateItem(item, index, errors) {
@@ -36,6 +35,44 @@ function validateItem(item, index, errors) {
   };
 }
 
+// --- [BARU] Helper Validasi Alamat ---
+function validateAddressAndLocation(body, errors) {
+  const address = body.shippingAddress || {};
+  const location = body.location || {};
+
+  const province = normalizeString(address.province);
+  const city = normalizeString(address.city);
+  const detail = normalizeString(address.detail);
+
+  if (!province || !city || !detail) {
+    addError(errors, 'shippingAddress', 'validation.address_incomplete', 'Alamat pengiriman (province, city, detail) wajib diisi');
+  }
+
+  const coordinates = location.coordinates;
+  const hasCoordinates = Array.isArray(coordinates) && coordinates.length === 2;
+  const numericCoordinates = hasCoordinates ? coordinates.map(Number) : [];
+  const coordinatesAreValid = numericCoordinates.every(Number.isFinite);
+
+  if (!hasCoordinates || !coordinatesAreValid) {
+    addError(errors, 'location', 'validation.invalid_coordinates', 'Titik lokasi wajib berupa [longitude, latitude] yang valid');
+  }
+
+  return {
+    shippingAddress: {
+      province: province || '',
+      city: city || '',
+      district: normalizeString(address.district) || '',
+      village: normalizeString(address.village) || '',
+      postalCode: normalizeString(address.postalCode) || '',
+      detail: detail || '',
+    },
+    location: {
+      type: normalizeString(location.type) || 'Point',
+      coordinates: numericCoordinates.length === 2 ? numericCoordinates : [0, 0],
+    },
+  };
+}
+
 function validateCreateOrder(req, res, next) {
   const errors = [];
   const body = req.body || {};
@@ -64,7 +101,7 @@ function validateCreateOrder(req, res, next) {
     addError(errors, 'totalAmount', 'validation.total_amount_invalid', 'Total belanja harus angka positif');
   }
   
-  // --- [UPDATE BARU] Validasi ScheduledAt (Tanggal Kunjungan) ---
+  // Validasi ScheduledAt (Tanggal Kunjungan)
   const scheduledAt = normalizeString(body.scheduledAt);
   if (!scheduledAt) {
     addError(errors, 'scheduledAt', 'validation.scheduled_at_required', 'Tanggal kunjungan wajib diisi');
@@ -73,6 +110,9 @@ function validateCreateOrder(req, res, next) {
   } else if (new Date(scheduledAt) < new Date()) {
       addError(errors, 'scheduledAt', 'validation.scheduled_at_past', 'Tanggal kunjungan tidak boleh di masa lalu');
   }
+  
+  // --- [UPDATE BARU] Validasi Alamat dan Lokasi ---
+  const { shippingAddress, location } = validateAddressAndLocation(body, errors);
 
 
   if (errors.length) {
@@ -86,7 +126,9 @@ function validateCreateOrder(req, res, next) {
     providerId,
     items,
     totalAmount,
-    scheduledAt: new Date(scheduledAt) // Simpan sebagai objek Date
+    scheduledAt: new Date(scheduledAt), // Simpan sebagai objek Date
+    shippingAddress, // Simpan objek alamat
+    location,        // Simpan objek lokasi
   };
 
   return next();
