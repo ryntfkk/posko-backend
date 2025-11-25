@@ -1,3 +1,4 @@
+// src/modules/orders/validators.js
 const { addError, respondValidationErrors, normalizeString } = require('../../utils/validation');
 
 function validateItem(item, index, errors) {
@@ -62,6 +63,17 @@ function validateCreateOrder(req, res, next) {
   } else if (typeof totalAmount !== 'number' || totalAmount < 0) {
     addError(errors, 'totalAmount', 'validation.total_amount_invalid', 'Total belanja harus angka positif');
   }
+  
+  // --- [UPDATE BARU] Validasi ScheduledAt (Tanggal Kunjungan) ---
+  const scheduledAt = normalizeString(body.scheduledAt);
+  if (!scheduledAt) {
+    addError(errors, 'scheduledAt', 'validation.scheduled_at_required', 'Tanggal kunjungan wajib diisi');
+  } else if (isNaN(Date.parse(scheduledAt))) {
+    addError(errors, 'scheduledAt', 'validation.scheduled_at_invalid', 'Format tanggal kunjungan tidak valid');
+  } else if (new Date(scheduledAt) < new Date()) {
+      addError(errors, 'scheduledAt', 'validation.scheduled_at_past', 'Tanggal kunjungan tidak boleh di masa lalu');
+  }
+
 
   if (errors.length) {
     return respondValidationErrors(req, res, errors);
@@ -74,6 +86,7 @@ function validateCreateOrder(req, res, next) {
     providerId,
     items,
     totalAmount,
+    scheduledAt: new Date(scheduledAt) // Simpan sebagai objek Date
   };
 
   return next();

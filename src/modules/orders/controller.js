@@ -47,7 +47,8 @@ async function createOrder(req, res, next) {
       return res.status(401).json({ message: 'Unauthorized' });
     }
 
-    const { providerId, items = [], totalAmount = 0, orderType } = req.body;
+    // --- [UPDATE] Ambil scheduledAt dari body (sudah berupa objek Date dari validator) ---
+    const { providerId, items = [], totalAmount = 0, orderType, scheduledAt } = req.body;
 
     // --- [UPDATE] VALIDASI JADWAL MITRA (Khusus Direct Order) ---
     if (orderType === 'direct') {
@@ -59,38 +60,49 @@ async function createOrder(req, res, next) {
         if (!provider) {
             return res.status(404).json({ message: 'Mitra tidak ditemukan atau tidak aktif.' });
         }
-
-        // Logika Cek Hari & Jam (WIB / UTC+7)
-        // Kita gunakan toLocaleString untuk memastikan waktu sesuai zona waktu Indonesia
-        const now = new Date();
-        const wibString = now.toLocaleString("en-US", { timeZone: "Asia/Jakarta" });
-        const wibDate = new Date(wibString);
-
-        const currentDayIndex = wibDate.getDay(); // 0 = Minggu, 1 = Senin, dst.
         
-        // Format jam saat ini menjadi "HH:mm" (misal: 14:30) untuk perbandingan string
-        const currentHours = wibDate.getHours().toString().padStart(2, '0');
-        const currentMinutes = wibDate.getMinutes().toString().padStart(2, '0');
-        const currentTimeStr = `${currentHours}:${currentMinutes}`;
+        // --- LOGIKA PERBAIKAN: Gunakan scheduledAt untuk validasi ---
+        
+        // 1. Dapatkan tanggal dan waktu kunjungan dalam zona waktu WIB/Jakarta
+        // Kita gunakan toLocaleString untuk memastikan konversi waktu sesuai zona waktu
+        const scheduledWIBString = scheduledAt.toLocaleString("en-US", { timeZone: "Asia/Jakarta" });
+        const scheduledWIBDate = new Date(scheduledWIBString);
 
-        // Cek jadwal di database provider
+        // 2. Tentukan Hari dan Jam untuk Validasi
+        const scheduledDayIndex = scheduledWIBDate.getDay(); // 0 = Minggu, 1 = Senin, dst.
+        const scheduledTimeStr = `${scheduledWIBDate.getHours().toString().padStart(2, '0')}:${scheduledWIBDate.getMinutes().toString().padStart(2, '0')}`;
+        
+        // 3. Cek apakah tanggal yang dipilih diblokir manual oleh Provider
+        const scheduledDateOnly = scheduledWIBString.split(',')[0]; // Format "MM/DD/YYYY" atau sejenisnya
+        
+        const isBlocked = provider.blockedDates.some(blockedDate => {
+             // Convert blockedDate (Date object) ke format string yang sama
+             const blockedWIBString = blockedDate.toLocaleString("en-US", { timeZone: "Asia/Jakarta" });
+             const blockedDateOnly = blockedWIBString.split(',')[0];
+             return blockedDateOnly === scheduledDateOnly;
+        });
+        
+        if (isBlocked) {
+             return res.status(400).json({
+                message: 'Tanggal kunjungan ini diblokir manual oleh Mitra. Pilih tanggal lain.'
+             });
+        }
+        
+        // 4. Cek Jadwal Harian (Jam Operasional)
         if (provider.schedule && provider.schedule.length > 0) {
-            const todaySchedule = provider.schedule.find(s => s.dayIndex === currentDayIndex);
+            const daySchedule = provider.schedule.find(s => s.dayIndex === scheduledDayIndex);
 
-            // Jika jadwal hari ini ditemukan
-            if (todaySchedule) {
-                // 1. Cek apakah Toko Tutup Hari Ini
-                if (!todaySchedule.isOpen) {
+            if (daySchedule) {
+                if (!daySchedule.isOpen) {
                     return res.status(400).json({
-                        message: `Gagal membuat pesanan. Mitra tutup pada hari ini (${todaySchedule.dayName}).`
+                        message: `Mitra tutup pada hari yang Anda pilih (${daySchedule.dayName}).`
                     });
                 }
 
-                // 2. Cek Jam Operasional (Start - End)
-                // Asumsi format di DB "09:00" dan "17:00"
-                if (currentTimeStr < todaySchedule.start || currentTimeStr > todaySchedule.end) {
+                // Cek Jam Operasional (scheduledTimeStr harus di antara start dan end)
+                if (scheduledTimeStr < daySchedule.start || scheduledTimeStr > daySchedule.end) {
                      return res.status(400).json({
-                        message: `Mitra sedang tutup. Jam operasional hari ini: ${todaySchedule.start} - ${todaySchedule.end} WIB.`
+                        message: `Waktu kunjungan di luar jam operasional Mitra (${daySchedule.start} - ${daySchedule.end} WIB) pada hari tersebut.`
                     });
                 }
             }
@@ -98,7 +110,8 @@ async function createOrder(req, res, next) {
     }
     // -------------------------------------------------------------
 
-    const order = new Order({ userId, providerId, items, totalAmount, orderType });
+    // --- [UPDATE] Simpan scheduledAt yang sudah divalidasi ---
+    const order = new Order({ userId, providerId, items, totalAmount, orderType, scheduledAt });
     
     await order.save();
     res.status(201).json({ message: 'Pesanan berhasil dibuat', data: order });
@@ -164,7 +177,7 @@ async function listIncomingOrders(req, res, next) {
     })
     .populate('userId', 'fullName address location profilePictureUrl phoneNumber') 
     .populate('items.serviceId', 'name category iconUrl')
-    .sort({ createdAt: -1 }); 
+    .sort({ scheduledAt: 1 }); // [PERBAIKAN] Urutkan berdasarkan tanggal kunjungan
 
     res.json({ message: 'Daftar order masuk berhasil diambil', data: orders });
   } catch (error) {
