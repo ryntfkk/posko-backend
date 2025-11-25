@@ -5,7 +5,6 @@ const authenticate = require('../../middlewares/auth');
 
 const router = express.Router();
 
-router.get('/seed-demo', controller.seedServices);
 // Public: Siapa saja bisa lihat daftar layanan
 router.get('/', controller.listServices);
 
