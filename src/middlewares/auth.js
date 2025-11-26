@@ -1,3 +1,4 @@
+// src/middlewares/auth.js
 const jwt = require('jsonwebtoken');
 const env = require('../config/env');
 
@@ -9,7 +10,7 @@ function unauthorizedResponse(req, res, messageKey, defaultMessage, status = 401
 }
 
 function authenticate(req, res, next) {
-  const authHeader = req.headers.authorization || '';
+  const authHeader = req.headers. authorization || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
 
   if (!token) {
@@ -17,7 +18,7 @@ function authenticate(req, res, next) {
   }
 
   try {
-    const decoded = jwt.verify(token, env.jwtSecret);
+    const decoded = jwt. verify(token, env.jwtSecret);
     req.user = decoded;
     return next();
   } catch (error) {
