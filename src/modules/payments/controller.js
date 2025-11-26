@@ -1,3 +1,4 @@
+// src/modules/payments/controller.js
 const mongoose = require('mongoose');
 const Payment = require('./model');
 const Order = require('../orders/model');
@@ -6,9 +7,9 @@ const { checkMidtransConfig } = require('../../utils/midtransConfig');
 
 async function listPayments(req, res, next) {
   try {
-    const payments = await Payment.find().populate('orderId');
+    const payments = await Payment.find(). populate('orderId');
     const messageKey = 'payments.list';
-    res.json({ messageKey, message: req.t ? req.t(messageKey) : 'Payment List', data: payments });
+    res.json({ messageKey, message: req.t ?  req.t(messageKey) : 'Payment List', data: payments });
   } catch (error) {
     next(error);
   }
@@ -16,7 +17,7 @@ async function listPayments(req, res, next) {
 
 async function createPayment(req, res, next) {
   try {
-        const { isConfigured, missingKeys } = checkMidtransConfig();
+    const { isConfigured, missingKeys } = checkMidtransConfig();
     if (!isConfigured) {
       return res.status(503).json({
         message: 'Payment service is temporarily unavailable due to incomplete configuration.',
@@ -29,12 +30,12 @@ async function createPayment(req, res, next) {
     // 1. Ambil Data Order
     const order = await Order.findById(orderId).populate('userId');
     if (!order) {
-      return res.status(404).json({ message: 'Order tidak ditemukan' });
+      return res.status(404). json({ message: 'Order tidak ditemukan' });
     }
 
     // 2. Buat Order ID unik untuk Midtrans
     const midtransOrderId = `POSKO-${order._id}-${Date.now()}`;
-    const currentBaseUrl = process.env.CLIENT_URL || "http://localhost:3000"; // Gunakan env jika ada
+    const currentBaseUrl = process.env.CLIENT_URL || "http://localhost:3000";
     
     const transactionDetails = {
       transaction_details: {
@@ -84,66 +85,106 @@ async function createPayment(req, res, next) {
   }
 }
 
+// --- [PERBAIKAN UTAMA] HANDLE NOTIFICATION DENGAN ORDER ID EXTRACTION YANG ROBUST ---
 async function handleNotification(req, res, next) {
   try {
     const notification = req.body;
     
     const transactionStatus = notification.transaction_status;
     const fraudStatus = notification.fraud_status;
-    const orderIdFull = notification.order_id; 
+    const orderIdFull = notification.order_id;
 
-    // 1. Ekstrak Order ID Asli
-    const splitOrderId = orderIdFull.split('-');
-    const realOrderId = splitOrderId[1]; 
-
-    // 2. Validasi ID MongoDB
-    if (!realOrderId || !mongoose.Types.ObjectId.isValid(realOrderId)) {
-        console.log(`⚠️ Ignored invalid Order ID: ${realOrderId}`);
-        return res.status(200).json({ message: 'Invalid Order ID ignored' });
+    // --- [PERBAIKAN 1] Ekstrak Order ID dengan Regex (Lebih Robust) ---
+    // Format: POSKO-{MongoDB_ObjectId}-{Timestamp}
+    // MongoDB ObjectId format: 24 hex characters [a-f0-9]{24}
+    const match = orderIdFull.match(/^POSKO-([a-f0-9]{24})-\d+$/i);
+    
+    if (!match || !match[1]) {
+      console.warn(`⚠️ Invalid Order ID format: ${orderIdFull}`);
+      return res. status(400).json({ 
+        message: 'Invalid Order ID format',
+        receivedFormat: orderIdFull
+      });
     }
 
-    // 3. Tentukan Status Pembayaran
+    const realOrderId = match[1];
+
+    // --- [PERBAIKAN 2] Validasi Format MongoDB ObjectId ---
+    if (!mongoose. Types.ObjectId.isValid(realOrderId)) {
+      console.warn(`⚠️ Invalid MongoDB ObjectId: ${realOrderId}`);
+      return res. status(400).json({ 
+        message: 'Invalid MongoDB Object ID',
+        receivedId: realOrderId
+      });
+    }
+
+    // --- [PERBAIKAN 3] Tentukan Status Pembayaran Berdasarkan Midtrans Status ---
     let paymentStatus = 'pending';
-    if (transactionStatus == 'capture') {
-        if (fraudStatus == 'challenge') {
-            paymentStatus = 'pending';
-        } else if (fraudStatus == 'accept') {
-            paymentStatus = 'paid';
-        }
-    } else if (transactionStatus == 'settlement') {
+    
+    if (transactionStatus === 'capture') {
+      if (fraudStatus === 'challenge') {
+        paymentStatus = 'pending'; // Menunggu review fraud
+      } else if (fraudStatus === 'accept') {
         paymentStatus = 'paid';
+      }
+    } else if (transactionStatus === 'settlement') {
+      paymentStatus = 'paid'; // Settlement dari bank
     } else if (['cancel', 'deny', 'expire'].includes(transactionStatus)) {
-        paymentStatus = 'failed';
+      paymentStatus = 'failed';
+    } else if (transactionStatus === 'pending') {
+      paymentStatus = 'pending'; // Masih pending
     }
 
-    console.log(`🔔 Webhook: ${realOrderId} status ${paymentStatus} (${transactionStatus})`);
+    console.log(`🔔 Webhook: Order ${realOrderId} → Status: ${paymentStatus} (${transactionStatus})`);
 
-    // 4. Update Database
+    // --- [PERBAIKAN 4] Update Payment & Order dengan Transactional Logic ---
+    const payment = await Payment.findOne({ orderId: realOrderId });
+    
+    if (!payment) {
+      console.warn(`⚠️ Payment record not found for Order: ${realOrderId}`);
+      // Tetap return 200 agar Midtrans tidak retry
+      return res.status(200).json({ message: 'Payment record not found (ignored)' });
+    }
+
+    const order = await Order.findById(realOrderId);
+    if (!order) {
+      console.warn(`⚠️ Order not found: ${realOrderId}`);
+      return res.status(200).json({ message: 'Order not found (ignored)' });
+    }
+
+    // --- [PERBAIKAN 5] Update Payment Status ---
+    payment.status = paymentStatus;
+    await payment.save();
+
+    // --- [PERBAIKAN 6] Update Order Status Berdasarkan Payment & Order Type ---
     if (paymentStatus === 'paid') {
-        await Payment.findOneAndUpdate({ orderId: realOrderId }, { status: 'paid' });
+      // Jika pembayaran berhasil
+      if (['pending', 'cancelled'].includes(order.status)) {
+        const nextStatus = order.orderType === 'direct' ? 'paid' : 'searching';
+        order.status = nextStatus;
+        await order.save();
         
-        const order = await Order.findById(realOrderId);
-        if (order) {
-            // [PERBAIKAN UTAMA DISINI]
-            // Jika Direct Order -> Status 'paid' (Menunggu konfirmasi Provider)
-            // Jika Basic Order  -> Status 'searching' (Mencari Provider via broadcast)
-            
-            // Cek dulu agar tidak menimpa status jika sudah diproses lanjut (misal accepted/working)
-            if (['pending', 'cancelled'].includes(order.status)) {
-                const nextStatus = order.orderType === 'direct' ? 'paid' : 'searching';
-                await Order.findByIdAndUpdate(realOrderId, { status: nextStatus });
-            }
-        }
+        console.log(`✅ Order ${realOrderId} updated to status: ${nextStatus}`);
+      } else {
+        console.log(`ℹ️ Order ${realOrderId} already in progress (status: ${order.status}), no status update`);
+      }
     } else if (paymentStatus === 'failed') {
-        await Payment.findOneAndUpdate({ orderId: realOrderId }, { status: 'failed' });
-        await Order.findByIdAndUpdate(realOrderId, { status: 'cancelled' });
+      // Jika pembayaran gagal
+      if (! ['completed', 'working', 'waiting_approval'].includes(order.status)) {
+        order.status = 'cancelled';
+        await order.save();
+        
+        console.log(`⚠️ Order ${realOrderId} cancelled due to payment failure`);
+      }
     }
 
-    res.status(200).json({ message: 'OK' });
+    // Selalu return 200 OK kepada Midtrans untuk acknowledge webhook
+    res.status(200).json({ message: 'Webhook processed successfully' });
 
   } catch (error) {
-    console.error('❌ Webhook Error:', error);
-    res.status(200).json({ message: 'Error handled' }); 
+    console.error('❌ Webhook Processing Error:', error);
+    // Tetap return 200 agar Midtrans tidak retry
+    res.status(200).json({ message: 'Error handled internally' });
   }
 }
 
