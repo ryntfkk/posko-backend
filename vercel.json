@@ -1,5 +1,6 @@
 {
-  "version": 2,
+  "buildCommand": "npm run build || npm install",
+  "devCommand": "npm run dev",
   "builds": [
     {
       "src": "src/index.js",
@@ -11,5 +12,15 @@
       "src": "/(.*)",
       "dest": "src/index.js"
     }
-  ]
+  ],
+  "env": {
+    "NODE_ENV": "production",
+    "MONGO_URI": "@mongo_uri",
+    "JWT_SECRET": "@jwt_secret",
+    "JWT_REFRESH_SECRET": "@jwt_refresh_secret",
+    "MIDTRANS_KEY": "@midtrans_key",
+    "MIDTRANS_CLIENT_KEY": "@midtrans_client_key",
+    "MIDTRANS_MERCHANT_ID": "@midtrans_merchant_id",
+    "CLIENT_URL": "@client_url"
+  }
 }
