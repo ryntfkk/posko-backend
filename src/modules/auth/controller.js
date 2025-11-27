@@ -1,9 +1,8 @@
-// src/modules/auth/controller.js
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const env = require('../../config/env');
 const User = require('../../models/User');
-const Provider = require('../providers/model');
+const Provider = require('../providers/model'); // Pastikan import Model Provider
 
 function sanitizeUser(userDoc) {
   const user = userDoc.toObject();
@@ -25,6 +24,7 @@ function generateTokens(user) {
   return { accessToken, refreshToken };
 }
 
+// ... (Fungsi register dan login biarkan tetap sama) ...
 async function register(req, res, next) {
   try {
     const {
@@ -60,12 +60,12 @@ async function login(req, res, next) {
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       const messageKey = 'auth.invalid_password';
-      return res. status(401).json({ messageKey, message: req.t(messageKey) });
+      return res.status(401).json({ messageKey, message: req.t(messageKey) });
     }
 
     const { accessToken, refreshToken } = generateTokens(user);
     user.refreshTokens.push(refreshToken);
-    await user. save();
+    await user.save();
     const messageKey = 'auth.login_success';
     const safeUser = sanitizeUser(user);
     
@@ -74,8 +74,7 @@ async function login(req, res, next) {
       message: req.t(messageKey),
       data: {
         tokens: { accessToken, refreshToken },
-        profile: safeUser,
-        userId: user._id. toString(),
+        profile: safeUser, // Kirim full object user agar frontend dapat data lengkap
       },
     });
   } catch (error) {
@@ -93,6 +92,7 @@ async function getProfile(req, res, next) {
     }
 
     const safeUser = sanitizeUser(user);
+    // Kita kirim structure yang konsisten dengan Login
     res.json({
       messageKey: 'auth.profile_success',
       message: 'Profile fetched',
@@ -105,84 +105,30 @@ async function getProfile(req, res, next) {
   }
 }
 
-// --- FITUR BARU: REFRESH ACCESS TOKEN ---
-async function refreshAccessToken(req, res, next) {
-  try {
-    const { refreshToken } = req.body;
-
-    if (!refreshToken) {
-      return res.status(400).json({
-        messageKey: 'auth.refresh_token_required',
-        message: 'Refresh token is required'
-      });
-    }
-
-    let decoded;
-    try {
-      decoded = jwt.verify(refreshToken, env.jwtRefreshSecret);
-    } catch (error) {
-      return res.status(401).json({
-        messageKey: 'auth.refresh_token_invalid',
-        message: 'Invalid or expired refresh token'
-      });
-    }
-
-    const user = await User.findById(decoded.userId);
-    if (!user) {
-      return res.status(404).json({
-        messageKey: 'auth.user_not_found',
-        message: 'User not found'
-      });
-    }
-
-    // Validasi refresh token ada di database
-    if (! user.refreshTokens.includes(refreshToken)) {
-      return res.status(401).json({
-        messageKey: 'auth. refresh_token_not_found',
-        message: 'Refresh token not found or revoked'
-      });
-    }
-
-    // Generate token baru
-    const { accessToken: newAccessToken, refreshToken: newRefreshToken } = generateTokens(user);
-
-    // Update refresh token di database (replace yang lama dengan yang baru)
-    user.refreshTokens = user.refreshTokens.filter(token => token !== refreshToken);
-    user.refreshTokens.push(newRefreshToken);
-    await user.save();
-
-    const safeUser = sanitizeUser(user);
-
-    res.json({
-      messageKey: 'auth.token_refreshed',
-      message: 'Token refreshed successfully',
-      data: {
-        tokens: { accessToken: newAccessToken, refreshToken: newRefreshToken },
-        profile: safeUser
-      }
-    });
-  } catch (error) {
-    next(error);
-  }
-}
-
 // --- FITUR BARU: SWITCH ROLE ---
 async function switchRole(req, res, next) {
   try {
     const userId = req.user.userId;
-    const { role } = req.body;
+    const { role } = req.body; // 'customer' atau 'provider'
 
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
+    // Validasi: User harus punya role tersebut sebelum switch
     if (!user.roles.includes(role)) {
       return res.status(403).json({ message: `Anda belum terdaftar sebagai ${role}` });
     }
 
+    // Update activeRole
     user.activeRole = role;
     await user.save();
 
+    // Regenerate Token dengan activeRole baru
     const { accessToken, refreshToken } = generateTokens(user);
+    
+    // Update refresh token di DB (opsional: replace atau push)
+    // user.refreshTokens.push(refreshToken); 
+    // await user.save();
 
     res.json({
       message: `Berhasil beralih ke mode ${role}`,
@@ -204,23 +150,28 @@ async function registerPartner(req, res, next) {
     
     if (!user) return res.status(404).json({ message: 'User not found' });
 
+    // 1. Tambahkan role 'provider' jika belum ada
     if (!user.roles.includes('provider')) {
       user.roles.push('provider');
     }
 
+    // 2. Ubah activeRole langsung ke provider agar user langsung masuk dashboard
     user.activeRole = 'provider';
     await user.save();
 
+    // 3. Buat dokumen Provider (Profile Mitra) jika belum ada
+    // Cek apakah data provider sudah ada
     const existingProvider = await Provider.findOne({ userId });
-    if (! existingProvider) {
+    if (!existingProvider) {
       const newProvider = new Provider({
         userId,
-        services: [],
+        services: [], // Nanti bisa diupdate lewat menu settings
         rating: 0
       });
-      await newProvider. save();
+      await newProvider.save();
     }
 
+    // 4. Regenerate Token
     const { accessToken, refreshToken } = generateTokens(user);
 
     res.json({
@@ -239,8 +190,7 @@ async function registerPartner(req, res, next) {
 module.exports = { 
   register, 
   login, 
-  getProfile,
-  refreshAccessToken,
-  switchRole,
-  registerPartner
+  getProfile, 
+  switchRole,      // Export baru
+  registerPartner  // Export baru
 };
