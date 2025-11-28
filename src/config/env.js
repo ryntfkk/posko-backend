@@ -51,7 +51,7 @@ const config = {
   // [NEW] Manual Override for Midtrans Environment
   // If this exists in .env, it takes precedence over everything else
   midtransIsProduction: process.env.MIDTRANS_IS_PRODUCTION !== undefined 
-    ? process.env.MIDTRANS_IS_PRODUCTION === 'true' 
+    ? process.env.MIDTRANS_IS_PRODUCTION === 'false' 
     : undefined,
 };
 
