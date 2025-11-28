@@ -2,8 +2,6 @@ const mongoose = require('mongoose');
 const env = require('../config/env');
 
 // Global cache variable for Serverless environment
-// This preserves the connection across hot-reloads in development
-// and separate invocations in the same container in production.
 let cached = global.mongoose;
 
 if (!cached) {
@@ -13,12 +11,12 @@ if (!cached) {
 // Mongoose connection options optimized for Vercel serverless
 const mongooseOptions = {
   bufferCommands: false, // Fail fast if not connected
-  serverSelectionTimeoutMS: 30000,
+  serverSelectionTimeoutMS: 10000, // [UPDATED] Lower timeout to fail faster (10s)
   socketTimeoutMS: 45000,
   maxPoolSize: 10,
-  minPoolSize: 1,
+  minPoolSize: 0, // [UPDATED] Set to 0 to prevent stale connections in serverless
   maxIdleTimeMS: 10000,
-  connectTimeoutMS: 30000,
+  connectTimeoutMS: 10000, // [UPDATED] Lower connection timeout
   heartbeatFrequencyMS: 10000,
 };
 
@@ -27,13 +25,22 @@ const mongooseOptions = {
  * @returns {Promise<any>} Mongoose connection
  */
 const connectDB = async () => {
+  // [UPDATED] Check if connection is actually alive (readyState === 1)
   if (cached.conn) {
-    return cached.conn;
+    if (mongoose.connection.readyState === 1) {
+      return cached.conn;
+    }
+    console.log('⚠️ Stale connection detected (State: ' + mongoose.connection.readyState + '). Reconnecting...');
+    cached.conn = null;
+    cached.promise = null;
   }
 
   if (!cached.promise) {
     console.log('🔄 Initializing new MongoDB connection...');
-    
+
+    // Fix: Handle Mongoose deprecation warnings if any
+    mongoose.set('strictQuery', false);
+
     cached.promise = mongoose.connect(env.mongoUri, mongooseOptions)
       .then((mongoose) => {
         console.log('✅ Database connected successfully');
@@ -91,8 +98,7 @@ const ensureConnection = async () => {
   }
 };
 
-// Event listeners for monitoring (optional but good for debugging)
-// Note: In serverless, these might not always emit if the process is frozen
+// Event listeners for monitoring
 if (mongoose.connection.listeners('connected').length === 0) {
   mongoose.connection.on('connected', () => {
     console.log('📊 MongoDB connection established');
@@ -100,6 +106,7 @@ if (mongoose.connection.listeners('connected').length === 0) {
 
   mongoose.connection.on('disconnected', () => {
     console.log('📊 MongoDB connection disconnected');
+    // [UPDATED] Clear cache on explicit disconnect
     cached.conn = null;
   });
 
