@@ -14,7 +14,8 @@ if (missingEnvVars.length > 0) {
   throw new Error(message);
 }
 
-const midtransKeys = ['MIDTRANS_KEY', 'MIDTRANS_CLIENT_KEY', 'MIDTRANS_MERCHANT_ID'];
+// Removed MIDTRANS_MERCHANT_ID from required check list
+const midtransKeys = ['MIDTRANS_KEY', 'MIDTRANS_CLIENT_KEY']; 
 const missingMidtransKeys = midtransKeys.filter(
   (key) => !process.env[key] || process.env[key].trim() === ''
 );

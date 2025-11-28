@@ -3,7 +3,7 @@ const env = require('../config/env');
 const MIDTRANS_CONFIG = {
   MIDTRANS_KEY: env.midtransKey,
   MIDTRANS_CLIENT_KEY: env.midtransClientKey,
-  MIDTRANS_MERCHANT_ID: env.midtransMerchantId,
+  // MIDTRANS_MERCHANT_ID: env.midtransMerchantId, // OPTIONAL: Removed from mandatory check
 };
 
 function checkMidtransConfig() {
