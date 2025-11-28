@@ -33,9 +33,10 @@ const config = {
   mongoUri: process.env.MONGO_URI,
   jwtSecret: process.env.JWT_SECRET,
   jwtRefreshSecret: process.env.JWT_REFRESH_SECRET,
-  midtransKey: process.env.MIDTRANS_KEY,
-  midtransClientKey: process.env.MIDTRANS_CLIENT_KEY,
-  midtransMerchantId: process.env.MIDTRANS_MERCHANT_ID,
+  // [FIX] Trim keys to prevent accidental whitespace errors
+  midtransKey: process.env.MIDTRANS_KEY ? process.env.MIDTRANS_KEY.trim() : undefined,
+  midtransClientKey: process.env.MIDTRANS_CLIENT_KEY ? process.env.MIDTRANS_CLIENT_KEY.trim() : undefined,
+  midtransMerchantId: process.env.MIDTRANS_MERCHANT_ID ? process.env.MIDTRANS_MERCHANT_ID.trim() : undefined,
 };
 
 module.exports = config;
