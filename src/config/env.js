@@ -27,16 +27,32 @@ if (missingMidtransKeys.length > 0) {
   );
 }
 
+// Helper: Removes whitespace AND quotes (common Vercel env var issues)
+function sanitizeKey(key) {
+  if (!key) return undefined;
+  let clean = key.trim();
+  if ((clean.startsWith('"') && clean.endsWith('"')) || (clean.startsWith("'") && clean.endsWith("'"))) {
+    clean = clean.slice(1, -1);
+  }
+  return clean;
+}
+
 const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port: Number(process.env.PORT) || 3000,
   mongoUri: process.env.MONGO_URI,
   jwtSecret: process.env.JWT_SECRET,
   jwtRefreshSecret: process.env.JWT_REFRESH_SECRET,
-  // [FIX] Trim keys to prevent accidental whitespace errors
-  midtransKey: process.env.MIDTRANS_KEY ? process.env.MIDTRANS_KEY.trim() : undefined,
-  midtransClientKey: process.env.MIDTRANS_CLIENT_KEY ? process.env.MIDTRANS_CLIENT_KEY.trim() : undefined,
-  midtransMerchantId: process.env.MIDTRANS_MERCHANT_ID ? process.env.MIDTRANS_MERCHANT_ID.trim() : undefined,
+  
+  midtransKey: sanitizeKey(process.env.MIDTRANS_KEY),
+  midtransClientKey: sanitizeKey(process.env.MIDTRANS_CLIENT_KEY),
+  midtransMerchantId: sanitizeKey(process.env.MIDTRANS_MERCHANT_ID),
+  
+  // [NEW] Manual Override for Midtrans Environment
+  // If this exists in .env, it takes precedence over everything else
+  midtransIsProduction: process.env.MIDTRANS_IS_PRODUCTION !== undefined 
+    ? process.env.MIDTRANS_IS_PRODUCTION === 'true' 
+    : undefined,
 };
 
 module.exports = config;
