@@ -43,7 +43,7 @@ const connectDB = async () => {
         console.error('❌ MongoDB connection failed:', err.message);
         cached.promise = null; // Reset promise on failure so we can retry
         throw err;
-      });
+      }); 
   }
 
   try {
