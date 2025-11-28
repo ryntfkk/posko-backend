@@ -13,12 +13,12 @@ if (!cached) {
 // Mongoose connection options optimized for Vercel serverless
 const mongooseOptions = {
   bufferCommands: false, // Fail fast if not connected
-  serverSelectionTimeoutMS: 5000,
+  serverSelectionTimeoutMS: 30000,
   socketTimeoutMS: 45000,
   maxPoolSize: 10,
   minPoolSize: 1,
   maxIdleTimeMS: 10000,
-  connectTimeoutMS: 10000,
+  connectTimeoutMS: 30000,
   heartbeatFrequencyMS: 10000,
 };
 
