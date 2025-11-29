@@ -1,9 +1,9 @@
 const mongoose = require('mongoose');
 
-const providerSchema = new mongoose.Schema(
+const providerSchema = new mongoose. Schema(
   {
     userId: {
-      type: mongoose.Schema.Types.ObjectId,
+      type: mongoose.Schema. Types.ObjectId,
       ref: 'User',
       required: true,
     },
@@ -35,16 +35,26 @@ const providerSchema = new mongoose.Schema(
       default: true, 
     },
     // [FITUR BARU] Daftar Tanggal Libur / Tidak Tersedia (Manual Block)
-    // Format penyimpanan di MongoDB: ISODate("2024-12-25T00:00:00.000Z")
+    // Format penyimpanan di MongoDB: ISODate("2024-12-25T00:00:00. 000Z")
     blockedDates: {
       type: [Date],
       default: [],
       index: true
-    }
+    },
+    // [BARU] Portfolio/Dokumentasi - Gambar hasil kerja mitra
+    portfolioImages: {
+      type: [String], // Array of image URLs
+      default: [],
+    },
+    // [BARU] Total pesanan selesai untuk statistik
+    totalCompletedOrders: {
+      type: Number,
+      default: 0,
+    },
   },
   { timestamps: true }
 );
 
 const Provider = mongoose.model('Provider', providerSchema);
 
-module.exports = Provider;
+module. exports = Provider;

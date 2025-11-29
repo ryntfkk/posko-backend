@@ -2,24 +2,29 @@
 const Provider = require('./model');
 const User = require('../../models/User');
 const Service = require('../services/model');
-const Order = require('../orders/model'); // [PENTING] Import Model Order
+const Order = require('../orders/model');
 
 const { Types } = require('mongoose');
 
 // Helper: Ambil tanggal-tanggal yang sudah dibooking (Order Aktif)
 async function getBookedDates(providerId) {
-  const activeOrders = await Order.find({
-    providerId: providerId,
-    status: { $in: ['accepted', 'on_the_way', 'working'] }, // Status yang dianggap "Sibuk"
-    scheduledAt: { $gte: new Date() } // Hanya ambil yang hari ini/masa depan
-  }).select('scheduledAt');
+  const activeStatuses = ['pending', 'paid', 'searching', 'accepted', 'on_the_way', 'working', 'waiting_approval'];
+  
+  const orders = await Order.find({
+    providerId,
+    status: { $in: activeStatuses }
+  }). select('scheduledAt');
 
-  // Kembalikan array tanggal (Start of Day)
-  return activeOrders.map(o => {
-      const d = new Date(o.scheduledAt);
-      d.setHours(0,0,0,0);
-      return d;
+  return orders.map(order => order.scheduledAt. toISOString(). split('T')[0]);
+}
+
+// Helper: Hitung total pesanan selesai
+async function getCompletedOrdersCount(providerId) {
+  const count = await Order.countDocuments({
+    providerId,
+    status: 'completed'
   });
+  return count;
 }
 
 async function listProviders(req, res, next) {
@@ -62,7 +67,7 @@ async function listProviders(req, res, next) {
     // 2. RELASI KE DATA PROVIDER
     pipeline.push({
       $lookup: {
-        from: 'providers', 
+        from: 'providers',
         localField: '_id',
         foreignField: 'userId',
         as: 'providerInfo'
@@ -74,17 +79,17 @@ async function listProviders(req, res, next) {
     pipeline.push({
       $lookup: {
         from: 'services',
-        localField: 'providerInfo.services.serviceId',
+        localField: 'providerInfo.services. serviceId',
         foreignField: '_id',
         as: 'serviceDetails'
       }
     });
 
-    // 4. LOGIKA FILTER
+    // 4.  LOGIKA FILTER
     const matchConditions = [];
 
     if (category) {
-      const categoryRegex = new RegExp(category.replace(/-/g, ' '), 'i');
+      const categoryRegex = new RegExp(category. replace(/-/g, ' '), 'i');
       matchConditions.push({
         'serviceDetails.category': { $regex: categoryRegex }
       });
@@ -92,7 +97,7 @@ async function listProviders(req, res, next) {
 
     if (search) {
       const searchRegex = new RegExp(search, 'i');
-      matchConditions.push({
+      matchConditions. push({
         $or: [
           { fullName: { $regex: searchRegex } },
           { 'address.city': { $regex: searchRegex } },
@@ -102,32 +107,28 @@ async function listProviders(req, res, next) {
     }
 
     if (matchConditions.length > 0) {
-      pipeline.push({
-        $match: { $and: matchConditions }
-      });
+      pipeline.push({ $match: { $and: matchConditions } });
     }
 
-    // 5. SORTING & PAGINATION
-    let sortStage = {};
-    if (sortBy === 'rating') {
-      sortStage = { 'providerInfo.rating': -1 };
-    } else if (sortBy === 'distance' && lat && lng) {
-      sortStage = { distance: 1 }; 
-    } else {
-      sortStage = { createdAt: -1 }; 
-    }
+    // 5. SORTING
+    const sortOptions = {
+      distance: { distance: 1 },
+      price_asc: { 'providerInfo.services.price': 1 },
+      price_desc: { 'providerInfo. services.price': -1 },
+      rating: { 'providerInfo. rating': -1 }
+    };
+    pipeline.push({ $sort: sortOptions[sortBy] || { distance: 1 } });
 
-    pipeline.push({ $sort: sortStage });
-    
+    // 6.  PAGINATION
     const skip = (parseInt(page) - 1) * parseInt(limit);
     pipeline.push({ $skip: skip });
     pipeline.push({ $limit: parseInt(limit) });
 
-    // 6. PROJECTION
+    // 7. PROJECT (Format Output)
     pipeline.push({
       $project: {
-        _id: '$providerInfo._id', 
-        userId: {                 
+        _id: '$providerInfo._id',
+        userId: {
           _id: '$_id',
           fullName: '$fullName',
           email: '$email',
@@ -138,9 +139,11 @@ async function listProviders(req, res, next) {
           phoneNumber: '$phoneNumber'
         },
         services: '$providerInfo.services',
-        rating: '$providerInfo.rating',
+        rating: '$providerInfo. rating',
         isOnline: '$providerInfo.isOnline',
-        blockedDates: '$providerInfo.blockedDates', // [UPDATE] Tampilkan Blocked Dates
+        blockedDates: '$providerInfo.blockedDates',
+        portfolioImages: '$providerInfo.portfolioImages', // [BARU] Tambah portfolioImages
+        totalCompletedOrders: '$providerInfo.totalCompletedOrders', // [BARU]
         createdAt: '$providerInfo.createdAt',
         distance: '$distance' 
       }
@@ -149,8 +152,8 @@ async function listProviders(req, res, next) {
     const providers = await User.aggregate(pipeline);
 
     await Provider.populate(providers, {
-      path: 'services.serviceId',
-      select: 'name category iconUrl basePrice',
+      path: 'services. serviceId',
+      select: 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent',
       model: Service
     });
 
@@ -170,7 +173,7 @@ async function getProviderById(req, res, next) {
     const { id } = req.params;
 
     if (!Types.ObjectId.isValid(id)) {
-      return res.status(404).json({ message: 'Mitra tidak ditemukan' });
+      return res. status(404).json({ message: 'Mitra tidak ditemukan' });
     }
 
     const provider = await Provider.findById(id)
@@ -180,20 +183,23 @@ async function getProviderById(req, res, next) {
       })
       .populate({
         path: 'services.serviceId',
-        select: 'name category iconUrl basePrice'
+        // [UPDATE] Tambahkan semua field yang diperlukan frontend
+        select: 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent'
       });
 
     if (!provider) {
-      return res.status(404).json({ message: 'Mitra tidak ditemukan' });
+      return res. status(404).json({ message: 'Mitra tidak ditemukan' });
     }
 
-    // [BARU] Ambil juga tanggal yang sudah ter-booking oleh customer lain
+    // Ambil tanggal yang sudah ter-booking
     const bookedDates = await getBookedDates(provider._id);
+    
+    // [BARU] Ambil total pesanan selesai
+    const totalCompletedOrders = await getCompletedOrdersCount(provider._id);
 
-    // Kirim data provider + bookedDates terpisah agar frontend bisa bedakan warna
-    // Kita convert object mongoose ke plain object dulu
     const providerData = provider.toObject();
-    providerData.bookedDates = bookedDates;
+    providerData. bookedDates = bookedDates;
+    providerData.totalCompletedOrders = totalCompletedOrders;
 
     res.json({ 
       messageKey: 'providers.detail', 
@@ -207,18 +213,20 @@ async function getProviderById(req, res, next) {
 
 async function getProviderMe(req, res, next) {
   try {
-    const userId = req.user.userId;
+    const userId = req.user. userId;
     const provider = await Provider.findOne({ userId })
-      .populate('services.serviceId', 'name category iconUrl');
+      .populate('services.serviceId', 'name category iconUrl unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent');
 
     if (!provider) {
       return res.status(404).json({ message: 'Profil Mitra belum dibuat' });
     }
 
-    // [BARU] Ambil tanggal booked untuk dilihat sendiri oleh provider
     const bookedDates = await getBookedDates(provider._id);
+    const totalCompletedOrders = await getCompletedOrdersCount(provider._id);
+    
     const providerData = provider.toObject();
     providerData.bookedDates = bookedDates;
+    providerData.totalCompletedOrders = totalCompletedOrders;
 
     res.json({
       message: 'Profil mitra ditemukan',
@@ -231,7 +239,7 @@ async function getProviderMe(req, res, next) {
 
 async function createProvider(req, res, next) {
   try {
-    const { userId, services = [] } = req.body;
+    const { userId, services = [] } = req. body;
     
     const exist = await Provider.findOne({ userId });
     if (exist) {
@@ -246,7 +254,7 @@ async function createProvider(req, res, next) {
         activeRole: 'provider' 
     });
 
-    res.status(201).json({ 
+    res. status(201).json({ 
         messageKey: 'providers.created', 
         message: 'Provider berhasil didaftarkan', 
         data: provider 
@@ -256,28 +264,55 @@ async function createProvider(req, res, next) {
   }
 }
 
-// [BARU] Update Ketersediaan (Libur Manual)
+// Update Ketersediaan (Libur Manual)
 async function updateAvailability(req, res, next) {
   try {
-    const userId = req.user.userId; 
-    // Menerima array blockedDates: ["2024-12-25", "2024-12-31"]
-    const { blockedDates } = req.body; 
+    const userId = req.user. userId;
+    const { blockedDates } = req.body;
 
-    const provider = await Provider.findOne({ userId });
+    const provider = await Provider.findOneAndUpdate(
+      { userId },
+      { blockedDates },
+      { new: true }
+    );
+
     if (!provider) {
-        return res.status(404).json({ message: 'Profil Mitra tidak ditemukan' });
+      return res. status(404).json({ message: 'Profil Mitra tidak ditemukan' });
     }
 
-    // Update blockedDates
-    // Pastikan input adalah array of date yang valid
-    provider.blockedDates = blockedDates;
-    await provider.save();
+    res.json({
+      message: 'Jadwal ketersediaan berhasil diperbarui',
+      data: provider
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// [BARU] Update Portfolio Images
+async function updatePortfolio(req, res, next) {
+  try {
+    const userId = req. user.userId;
+    const { portfolioImages } = req. body;
+
+    if (!Array.isArray(portfolioImages)) {
+      return res.status(400).json({ message: 'portfolioImages harus berupa array' });
+    }
+
+    const provider = await Provider. findOneAndUpdate(
+      { userId },
+      { portfolioImages },
+      { new: true }
+    );
+
+    if (!provider) {
+      return res.status(404).json({ message: 'Profil Mitra tidak ditemukan' });
+    }
 
     res.json({
-        message: 'Ketersediaan kalender berhasil diperbarui',
-        data: provider.blockedDates
+      message: 'Portfolio berhasil diperbarui',
+      data: provider
     });
-
   } catch (error) {
     next(error);
   }
@@ -288,5 +323,6 @@ module.exports = {
     getProviderById, 
     getProviderMe, 
     createProvider, 
-    updateAvailability // Ganti updateSchedule jadi ini
+    updateAvailability,
+    updatePortfolio // [BARU]
 };
