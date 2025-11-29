@@ -6,7 +6,18 @@ async function listServices(req, res, next) {
     const { category, isActive } = req.query;
     const filter = {};
 
-    if (category) filter.category = category;
+    // [FIX] Case-insensitive category filter
+    // Normalize: lowercase dan replace dash dengan space untuk matching yang konsisten
+    if (category && typeof category === 'string' && category.trim() !== '') {
+      const normalizedCategory = decodeURIComponent(category)
+        .toLowerCase()
+        .trim()
+        .replace(/-/g, ' ');
+      
+      // Gunakan regex case-insensitive untuk matching
+      filter.category = { $regex: new RegExp(`^${escapeRegex(normalizedCategory)}$`, 'i') };
+    }
+
     if (isActive !== undefined) filter.isActive = isActive === 'true';
 
     const services = await Service.find(filter).lean({ virtuals: true });
@@ -20,13 +31,18 @@ async function listServices(req, res, next) {
   }
 }
 
+// [FIX] Helper function untuk escape regex special characters
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // POST /api/services (Admin Only)
 async function createService(req, res, next) {
   try {
     const { roles = [] } = req.user || {};
-    if (! roles.includes('admin')) {
+    if (!roles.includes('admin')) {
       return res.status(403).json({ 
-        message: 'Akses ditolak. Hanya admin yang bisa menambah layanan.' 
+        message: 'Akses ditolak.  Hanya admin yang bisa menambah layanan.' 
       });
     }
 
@@ -36,8 +52,8 @@ async function createService(req, res, next) {
       name,
       category,
       basePrice,
-      unit,        // ✅ [BARU]
-      unitLabel,   // ✅ [BARU]
+      unit,
+      unitLabel,
       description,
       iconUrl
     });
