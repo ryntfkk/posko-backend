@@ -3,22 +3,16 @@ const Service = require('./model');
 // GET /api/services (Public)
 async function listServices(req, res, next) {
   try {
-    const { category } = req.query; // 1. Ambil parameter category dari query string
+    const { category, isActive } = req.query;
+    const filter = {};
 
-    // 2. Siapkan filter dasar (hanya yang aktif)
-    let filter = { isActive: true };
+    if (category) filter.category = category;
+    if (isActive !== undefined) filter.isActive = isActive === 'true';
 
-    // 3. Jika ada category, tambahkan ke filter
-    if (category) {
-      // Menggunakan regex agar pencarian tidak case-sensitive (misal: "ac" cocok dengan "AC")
-      // Dan handle slug (jika category dikirim dalam bentuk slug seperti 'service-ac')
-      filter.category = { $regex: category.replace(/-/g, ' '), $options: 'i' };
-    }
+    const services = await Service.find(filter). lean({ virtuals: true });
 
-    const services = await Service.find(filter);
-    
     res.json({ 
-      message: 'Daftar layanan berhasil diambil', 
+      message: 'Daftar layanan', 
       data: services 
     });
   } catch (error) {
@@ -29,20 +23,21 @@ async function listServices(req, res, next) {
 // POST /api/services (Admin Only)
 async function createService(req, res, next) {
   try {
-    // Cek apakah user punya role 'admin'
     const { roles = [] } = req.user || {};
-    if (!roles.includes('admin')) {
+    if (! roles.includes('admin')) {
       return res.status(403).json({ 
-        message: 'Akses ditolak. Hanya admin yang bisa menambah layanan.' 
+        message: 'Akses ditolak.  Hanya admin yang bisa menambah layanan.' 
       });
     }
 
-    const { name, category, basePrice, description, iconUrl } = req.body;
+    const { name, category, basePrice, unit, unitLabel, description, iconUrl } = req. body;
 
     const service = new Service({
       name,
       category,
       basePrice,
+      unit,        // ✅ [BARU]
+      unitLabel,   // ✅ [BARU]
       description,
       iconUrl
     });
@@ -51,7 +46,7 @@ async function createService(req, res, next) {
 
     res.status(201).json({ 
       message: 'Layanan berhasil dibuat', 
-      data: service 
+      data: service. toJSON() 
     });
   } catch (error) {
     next(error);
