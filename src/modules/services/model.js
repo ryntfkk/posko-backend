@@ -245,7 +245,6 @@ serviceSchema.virtual('discountPercent').get(function() {
 });
 
 // ===== INDEXES =====
-serviceSchema.index({ slug: 1 });
 serviceSchema.index({ category: 1, isActive: 1 });
 serviceSchema.index({ tags: 1 });
 serviceSchema.index({ isFeatured: 1, sortOrder: 1 });
