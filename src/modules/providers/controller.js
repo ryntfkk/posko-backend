@@ -1,4 +1,4 @@
-// src/modules/providers/controller.js
+// src/modules/providers/controller. js
 const Provider = require('./model');
 const User = require('../../models/User');
 const Service = require('../services/model');
@@ -8,23 +8,21 @@ const { Types } = require('mongoose');
 
 // Helper: Ambil tanggal-tanggal yang sudah dibooking (Order Aktif)
 async function getBookedDates(providerId) {
-  const activeStatuses = ['pending', 'paid', 'searching', 'accepted', 'on_the_way', 'working', 'waiting_approval'];
-  
-  const orders = await Order.find({
+  const activeOrders = await Order.find({
     providerId,
-    status: { $in: activeStatuses }
-  }). select('scheduledAt');
+    status: { $in: ['accepted', 'on_the_way', 'working', 'waiting_approval'] },
+    scheduledAt: { $exists: true, $ne: null }
+  }). select('scheduledAt'). lean();
 
-  return orders.map(order => order.scheduledAt. toISOString(). split('T')[0]);
+  return activeOrders.map(o => o.scheduledAt. toISOString(). split('T')[0]);
 }
 
 // Helper: Hitung total pesanan selesai
 async function getCompletedOrdersCount(providerId) {
-  const count = await Order.countDocuments({
+  return await Order.countDocuments({
     providerId,
     status: 'completed'
   });
-  return count;
 }
 
 async function listProviders(req, res, next) {
@@ -64,7 +62,7 @@ async function listProviders(req, res, next) {
       });
     }
 
-    // 2. RELASI KE DATA PROVIDER
+    // 2.  RELASI KE DATA PROVIDER
     pipeline.push({
       $lookup: {
         from: 'providers',
@@ -75,8 +73,8 @@ async function listProviders(req, res, next) {
     });
     pipeline.push({ $unwind: '$providerInfo' });
 
-    // 3. RELASI KE LAYANAN
-    pipeline.push({
+    // 3.  RELASI KE LAYANAN
+    pipeline. push({
       $lookup: {
         from: 'services',
         localField: 'providerInfo.services. serviceId',
@@ -88,16 +86,59 @@ async function listProviders(req, res, next) {
     // 4.  LOGIKA FILTER
     const matchConditions = [];
 
+    // [PERBAIKAN] Filter Kategori dengan Penanganan yang Lebih Baik
     if (category) {
-      const categoryRegex = new RegExp(category. replace(/-/g, ' '), 'i');
+      // Decode URL parameter dan ganti dash dengan spasi
+      const decodedCategory = decodeURIComponent(category). replace(/-/g, ' ');
+      
+      // Buat regex yang lebih fleksibel (case-insensitive, trim whitespace)
+      const categoryRegex = new RegExp(`^\\s*${decodedCategory. trim()}\\s*$`, 'i');
+      
       matchConditions.push({
-        'serviceDetails.category': { $regex: categoryRegex }
+        $or: [
+          // Match di serviceDetails. category (string)
+          { 'serviceDetails.category': { $regex: categoryRegex } },
+          // Juga coba match di providerInfo.services jika ada referensi langsung
+          { 'providerInfo. services': { 
+            $elemMatch: { 
+              isActive: true 
+            } 
+          }}
+        ]
       });
+      
+      // Filter tambahan: Pastikan provider memiliki layanan aktif di kategori tersebut
+      pipeline.push({
+        $addFields: {
+          hasMatchingService: {
+            $gt: [
+              {
+                $size: {
+                  $filter: {
+                    input: '$serviceDetails',
+                    as: 'svc',
+                    cond: { 
+                      $regexMatch: { 
+                        input: '$$svc.category', 
+                        regex: categoryRegex 
+                      } 
+                    }
+                  }
+                }
+              },
+              0
+            ]
+          }
+        }
+      });
+      
+      // Hanya ambil provider yang punya layanan matching
+      matchConditions.push({ hasMatchingService: true });
     }
 
     if (search) {
       const searchRegex = new RegExp(search, 'i');
-      matchConditions. push({
+      matchConditions.push({
         $or: [
           { fullName: { $regex: searchRegex } },
           { 'address.city': { $regex: searchRegex } },
@@ -139,11 +180,11 @@ async function listProviders(req, res, next) {
           phoneNumber: '$phoneNumber'
         },
         services: '$providerInfo.services',
-        rating: '$providerInfo. rating',
+        rating: '$providerInfo.rating',
         isOnline: '$providerInfo.isOnline',
         blockedDates: '$providerInfo.blockedDates',
-        portfolioImages: '$providerInfo.portfolioImages', // [BARU] Tambah portfolioImages
-        totalCompletedOrders: '$providerInfo.totalCompletedOrders', // [BARU]
+        portfolioImages: '$providerInfo.portfolioImages',
+        totalCompletedOrders: '$providerInfo. totalCompletedOrders',
         createdAt: '$providerInfo.createdAt',
         distance: '$distance' 
       }
@@ -152,13 +193,13 @@ async function listProviders(req, res, next) {
     const providers = await User.aggregate(pipeline);
 
     await Provider.populate(providers, {
-      path: 'services. serviceId',
+      path: 'services.serviceId',
       select: 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent',
       model: Service
     });
 
     res.json({ 
-      messageKey: 'providers.list', 
+      messageKey: 'providers. list', 
       message: 'Berhasil memuat data mitra', 
       data: providers 
     });
@@ -183,18 +224,14 @@ async function getProviderById(req, res, next) {
       })
       .populate({
         path: 'services.serviceId',
-        // [UPDATE] Tambahkan semua field yang diperlukan frontend
         select: 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent'
       });
 
     if (!provider) {
-      return res. status(404).json({ message: 'Mitra tidak ditemukan' });
+      return res.status(404).json({ message: 'Mitra tidak ditemukan' });
     }
 
-    // Ambil tanggal yang sudah ter-booking
     const bookedDates = await getBookedDates(provider._id);
-    
-    // [BARU] Ambil total pesanan selesai
     const totalCompletedOrders = await getCompletedOrdersCount(provider._id);
 
     const providerData = provider.toObject();
@@ -217,7 +254,7 @@ async function getProviderMe(req, res, next) {
     const provider = await Provider.findOne({ userId })
       .populate('services.serviceId', 'name category iconUrl unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent');
 
-    if (!provider) {
+    if (! provider) {
       return res.status(404).json({ message: 'Profil Mitra belum dibuat' });
     }
 
@@ -289,7 +326,7 @@ async function updateAvailability(req, res, next) {
   }
 }
 
-// [BARU] Update Portfolio Images
+// Update Portfolio Images
 async function updatePortfolio(req, res, next) {
   try {
     const userId = req. user.userId;
@@ -324,5 +361,5 @@ module.exports = {
     getProviderMe, 
     createProvider, 
     updateAvailability,
-    updatePortfolio // [BARU]
+    updatePortfolio
 };
