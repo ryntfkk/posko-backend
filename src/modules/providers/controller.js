@@ -14,9 +14,9 @@ async function getBookedDates(providerId) {
     providerId,
     status: { $in: ['pending', 'accepted', 'in_progress'] },
     orderDate: { $gte: today }
-  }). select('orderDate');
+  }).select('orderDate');
 
-  return orders.map(o => o.orderDate. toISOString(). split('T')[0]);
+  return orders.map(o => o.orderDate. toISOString().split('T')[0]);
 }
 
 // Helper: Hitung total pesanan selesai
@@ -66,7 +66,7 @@ async function listProviders(req, res, next) {
       });
     }
 
-    // 2.  RELASI KE DATA PROVIDER
+    // 2. RELASI KE DATA PROVIDER
     pipeline.push({
       $lookup: {
         from: 'providers',
@@ -95,13 +95,21 @@ async function listProviders(req, res, next) {
       }
     });
 
-    // 4. LOGIKA FILTER
+    // 4.  LOGIKA FILTER
     const matchConditions = [];
     
-    // Filter Kategori dengan Logika yang Benar
+    // [FIX] Filter Kategori dengan Case-Insensitive Matching yang Lebih Robust
     if (category) {
-      const decodedCategory = decodeURIComponent(category). replace(/-/g, ' ');
-      const categoryRegex = new RegExp(`^\\s*${decodedCategory. trim()}\\s*$`, 'i');
+      // Normalize: decode, lowercase, trim, dan replace dash dengan space
+      const decodedCategory = decodeURIComponent(category)
+        .toLowerCase()
+        .trim()
+        .replace(/-/g, ' ');
+      
+      console.log(`[CATEGORY FILTER] Original: "${category}", Normalized: "${decodedCategory}"`);
+      
+      // Regex untuk match kategori (case-insensitive, whitespace flexible)
+      const categoryRegex = new RegExp(`^\\s*${decodedCategory. replace(/\s+/g, '\\s+')}\\s*$`, 'i');
       
       pipeline.push({
         $addFields: {
@@ -114,7 +122,7 @@ async function listProviders(req, res, next) {
                     as: 'svc',
                     cond: { 
                       $regexMatch: { 
-                        input: '$$svc.category', 
+                        input: { $toLower: '$$svc.category' }, // [FIX] Convert ke lowercase untuk matching
                         regex: categoryRegex 
                       } 
                     }
@@ -130,13 +138,16 @@ async function listProviders(req, res, next) {
       matchConditions.push({ hasMatchingService: true });
     }
 
+    // [FIX] Search Filter - Lebih Komprehensif
     if (search) {
       const searchRegex = new RegExp(search, 'i');
       matchConditions.push({
         $or: [
           { fullName: { $regex: searchRegex } },
           { 'address.city': { $regex: searchRegex } },
-          { 'serviceDetails.name': { $regex: searchRegex } }
+          { 'address.district': { $regex: searchRegex } },
+          { 'serviceDetails.name': { $regex: searchRegex } },
+          { 'serviceDetails.category': { $regex: searchRegex } }
         ]
       });
     }
@@ -175,7 +186,7 @@ async function listProviders(req, res, next) {
         },
         services: '$providerInfo.services',
         rating: '$providerInfo.rating',
-        isOnline: '$providerInfo.isOnline',
+        isOnline: '$providerInfo. isOnline',
         blockedDates: '$providerInfo.blockedDates',
         portfolioImages: '$providerInfo.portfolioImages',
         totalCompletedOrders: '$providerInfo.totalCompletedOrders',
@@ -193,6 +204,8 @@ async function listProviders(req, res, next) {
       model: Service
     });
 
+    console.log(`[PROVIDERS RESULT] Found ${providers.length} providers for category: "${category}"`);
+
     res.json({ 
       messageKey: 'providers. list', 
       message: 'Berhasil memuat data mitra', 
@@ -200,13 +213,14 @@ async function listProviders(req, res, next) {
     });
 
   } catch (error) {
+    console.error('[PROVIDERS ERROR]', error);
     next(error);
   }
 }
 
 async function getProviderById(req, res, next) {
   try {
-    const { id } = req.params;
+    const { id } = req. params;
 
     if (!Types.ObjectId.isValid(id)) {
       return res.status(404).json({ message: 'Mitra tidak ditemukan' });
@@ -218,12 +232,12 @@ async function getProviderById(req, res, next) {
         select: 'fullName profilePictureUrl address location bio phoneNumber'
       })
       .populate({
-        path: 'services.serviceId',
+        path: 'services. serviceId',
         select: 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent'
       });
 
     if (!provider) {
-      return res.status(404).json({ message: 'Mitra tidak ditemukan' });
+      return res.status(404). json({ message: 'Mitra tidak ditemukan' });
     }
 
     const bookedDates = await getBookedDates(provider._id);
@@ -245,7 +259,7 @@ async function getProviderById(req, res, next) {
 
 async function getProviderMe(req, res, next) {
   try {
-    const userId = req.user. userId;
+    const userId = req.user.userId;
     const provider = await Provider.findOne({ userId })
       .populate('services.serviceId', 'name category iconUrl unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent');
 
@@ -256,7 +270,7 @@ async function getProviderMe(req, res, next) {
     const bookedDates = await getBookedDates(provider._id);
     const totalCompletedOrders = await getCompletedOrdersCount(provider._id);
     
-    const providerData = provider.toObject();
+    const providerData = provider. toObject();
     providerData.bookedDates = bookedDates;
     providerData.totalCompletedOrders = totalCompletedOrders;
 
@@ -286,7 +300,7 @@ async function createProvider(req, res, next) {
         activeRole: 'provider' 
     });
 
-    res.status(201).json({ 
+    res. status(201).json({ 
         messageKey: 'providers.created', 
         message: 'Provider berhasil didaftarkan', 
         data: provider 
@@ -351,6 +365,6 @@ module.exports = {
     getProviderById, 
     getProviderMe, 
     createProvider, 
-    updateAvailability,
-    updatePortfolio
+    updateAvailability, 
+    updatePortfolio 
 };
