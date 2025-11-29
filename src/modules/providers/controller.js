@@ -14,9 +14,9 @@ async function getBookedDates(providerId) {
     providerId,
     status: { $in: ['pending', 'accepted', 'in_progress'] },
     orderDate: { $gte: today }
-  }). select('orderDate');
+  }).select('orderDate');
 
-  return orders.map(o => o.orderDate. toISOString(). split('T')[0]);
+  return orders.map(o => o.orderDate.toISOString().split('T')[0]);
 }
 
 // Helper: Hitung total pesanan selesai
@@ -38,11 +38,11 @@ async function listProviders(req, res, next) {
       sortBy = 'distance', 
       limit = 10, 
       page = 1 
-    } = req. query;
+    } = req.query;
 
     const pipeline = [];
 
-    // 1. GEO-SPATIAL FILTER
+    // 1.GEO-SPATIAL FILTER
     if (lat && lng) {
       pipeline.push({
         $geoNear: {
@@ -66,7 +66,7 @@ async function listProviders(req, res, next) {
       });
     }
 
-    // 2. RELASI KE DATA PROVIDER
+    // 2.RELASI KE DATA PROVIDER
     pipeline.push({
       $lookup: {
         from: 'providers',
@@ -85,8 +85,8 @@ async function listProviders(req, res, next) {
     
     pipeline.push({ $unwind: '$providerInfo' });
 
-    // 3.  RELASI KE LAYANAN
-    // [FIX] Hapus spasi di path - gunakan "providerInfo.services. serviceId" bukan "providerInfo.services.  serviceId"
+    // 3. RELASI KE LAYANAN
+    // [FIX] Hapus spasi di path - gunakan "providerInfo.services.serviceId" bukan "providerInfo.services. serviceId"
     pipeline.push({
       $lookup: {
         from: 'services',
@@ -96,7 +96,7 @@ async function listProviders(req, res, next) {
       }
     });
 
-    // 4. LOGIKA FILTER
+    // 4.LOGIKA FILTER
     const matchConditions = [];
     
     // [FIX] Filter Kategori - validasi ketat dan case-insensitive
@@ -149,7 +149,7 @@ async function listProviders(req, res, next) {
                           search.trim() !== '';
     
     if (isValidSearch) {
-      const searchRegex = new RegExp(search. trim(), 'i');
+      const searchRegex = new RegExp(search.trim(), 'i');
       matchConditions.push({
         $or: [
           { fullName: { $regex: searchRegex } },
@@ -165,21 +165,21 @@ async function listProviders(req, res, next) {
       pipeline.push({ $match: { $and: matchConditions } });
     }
 
-    // 5. SORTING
+    // 5.SORTING
     const sortOptions = {
       distance: { distance: 1 },
       price_asc: { 'providerInfo.services.price': 1 },
-      price_desc: { 'providerInfo. services.price': -1 },
-      rating: { 'providerInfo. rating': -1 }
+      price_desc: { 'providerInfo.services.price': -1 },
+      rating: { 'providerInfo.rating': -1 }
     };
     pipeline.push({ $sort: sortOptions[sortBy] || { distance: 1 } });
 
-    // 6. PAGINATION
+    // 6.PAGINATION
     const skip = (parseInt(page) - 1) * parseInt(limit);
     pipeline.push({ $skip: skip });
     pipeline.push({ $limit: parseInt(limit) });
 
-    // 7. PROJECT (Format Output)
+    // 7.PROJECT (Format Output)
     // [FIX] Hapus spasi di semua path
     pipeline.push({
       $project: {
@@ -199,7 +199,7 @@ async function listProviders(req, res, next) {
         isOnline: '$providerInfo.isOnline',  // ✅ TANPA SPASI
         blockedDates: '$providerInfo.blockedDates',
         portfolioImages: '$providerInfo.portfolioImages',
-        totalCompletedOrders: '$providerInfo. totalCompletedOrders',
+        totalCompletedOrders: '$providerInfo.totalCompletedOrders',
         createdAt: '$providerInfo.createdAt',
         distance: '$distance' 
       }
@@ -210,23 +210,23 @@ async function listProviders(req, res, next) {
     // Populate services dengan detail lengkap
     // [FIX] Hapus spasi di path
     await Provider.populate(providers, {
-      path: 'services. serviceId',  // ✅ TANPA SPASI
+      path: 'services.serviceId',  // ✅ TANPA SPASI
       select: 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent',
       model: Service
     });
 
     // [FIX] Log yang lebih informatif
     const filterInfo = isValidCategory ?  `category: "${category}"` : 'no category filter';
-    console. log(`[PROVIDERS RESULT] Found ${providers.length} providers (${filterInfo})`);
+    console.log(`[PROVIDERS RESULT] Found ${providers.length} providers (${filterInfo})`);
 
-    res. json({ 
+    res.json({ 
       messageKey: 'providers.list',  // ✅ TANPA SPASI
       message: 'Berhasil memuat data mitra', 
       data: providers 
     });
 
   } catch (error) {
-    console. error('[PROVIDERS ERROR]', error);
+    console.error('[PROVIDERS ERROR]', error);
     next(error);
   }
 }
@@ -236,7 +236,7 @@ async function getProviderById(req, res, next) {
     const { id } = req.params;
 
     if (!Types.ObjectId.isValid(id)) {
-      return res. status(404).json({ message: 'Mitra tidak ditemukan' });
+      return res.status(404).json({ message: 'Mitra tidak ditemukan' });
     }
 
     const provider = await Provider.findById(id)
@@ -250,14 +250,14 @@ async function getProviderById(req, res, next) {
       });
 
     if (!provider) {
-      return res. status(404).json({ message: 'Mitra tidak ditemukan' });
+      return res.status(404).json({ message: 'Mitra tidak ditemukan' });
     }
 
     const bookedDates = await getBookedDates(provider._id);
     const totalCompletedOrders = await getCompletedOrdersCount(provider._id);
 
     const providerData = provider.toObject();
-    providerData. bookedDates = bookedDates;
+    providerData.bookedDates = bookedDates;
     providerData.totalCompletedOrders = totalCompletedOrders;
 
     res.json({ 
@@ -272,7 +272,7 @@ async function getProviderById(req, res, next) {
 
 async function getProviderMe(req, res, next) {
   try {
-    const userId = req.user. userId;
+    const userId = req.user.userId;
     const provider = await Provider.findOne({ userId })
       .populate('services.serviceId', 'name category iconUrl unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent');
 
@@ -283,9 +283,9 @@ async function getProviderMe(req, res, next) {
     const bookedDates = await getBookedDates(provider._id);
     const totalCompletedOrders = await getCompletedOrdersCount(provider._id);
     
-    const providerData = provider. toObject();
+    const providerData = provider.toObject();
     providerData.bookedDates = bookedDates;
-    providerData. totalCompletedOrders = totalCompletedOrders;
+    providerData.totalCompletedOrders = totalCompletedOrders;
 
     res.json({
       message: 'Profil mitra ditemukan',
@@ -298,7 +298,7 @@ async function getProviderMe(req, res, next) {
 
 async function createProvider(req, res, next) {
   try {
-    const { userId, services = [] } = req. body;
+    const { userId, services = [] } = req.body;
     
     const exist = await Provider.findOne({ userId });
     if (exist) {
@@ -313,7 +313,7 @@ async function createProvider(req, res, next) {
         activeRole: 'provider' 
     });
 
-    res. status(201).json({ 
+    res.status(201).json({ 
         messageKey: 'providers.created', 
         message: 'Provider berhasil didaftarkan', 
         data: provider 
@@ -326,7 +326,7 @@ async function createProvider(req, res, next) {
 // Update Ketersediaan (Libur Manual)
 async function updateAvailability(req, res, next) {
   try {
-    const userId = req.user. userId;
+    const userId = req.user.userId;
     const { blockedDates } = req.body;
 
     const provider = await Provider.findOne({ userId });
@@ -349,22 +349,22 @@ async function updateAvailability(req, res, next) {
 // Update Portfolio Images
 async function updatePortfolio(req, res, next) {
   try {
-    const userId = req. user.userId;
+    const userId = req.user.userId;
     const { portfolioImages } = req.body;
 
-    if (!Array.isArray(portfolioImages) || portfolioImages. length === 0) {
-      return res.status(400). json({ message: 'Portfolio harus memiliki minimal 1 gambar' });
+    if (!Array.isArray(portfolioImages) || portfolioImages.length === 0) {
+      return res.status(400).json({ message: 'Portfolio harus memiliki minimal 1 gambar' });
     }
 
     const provider = await Provider.findOne({ userId });
     if (!provider) {
-      return res. status(404).json({ message: 'Profil mitra tidak ditemukan' });
+      return res.status(404).json({ message: 'Profil mitra tidak ditemukan' });
     }
 
     provider.portfolioImages = portfolioImages;
     await provider.save();
 
-    res. json({ 
+    res.json({ 
       message: 'Portfolio berhasil diperbarui',
       data: provider
     });
