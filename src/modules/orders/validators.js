@@ -1,26 +1,26 @@
 const { addError, respondValidationErrors, normalizeString } = require('../../utils/validation');
 
 function validateItem(item, index, errors) {
-  const serviceId = normalizeString(item?. serviceId);
+  const serviceId = normalizeString(item?.serviceId);
   if (!serviceId) {
-    addError(errors, `items[${index}].serviceId`, 'validation. service_id_required', 'Service ID pada item wajib diisi');
+    addError(errors, `items[${index}].serviceId`, 'validation.service_id_required', 'Service ID pada item wajib diisi');
   }
 
-  const name = normalizeString(item?. name);
+  const name = normalizeString(item?.name);
   if (!name) {
     addError(errors, `items[${index}].name`, 'validation.item_name_required', 'Nama item wajib diisi');
   }
 
   const quantity = item?.quantity;
   if (quantity === undefined) {
-    addError(errors, `items[${index}]. quantity`, 'validation.quantity_required', 'Jumlah item wajib diisi');
+    addError(errors, `items[${index}].quantity`, 'validation.quantity_required', 'Jumlah item wajib diisi');
   } else if (typeof quantity !== 'number' || Number.isNaN(quantity) || quantity < 1) {
     addError(errors, `items[${index}].quantity`, 'validation.quantity_invalid', 'Jumlah item harus angka minimal 1');
   }
 
   const price = item?.price;
   if (price === undefined) {
-    addError(errors, `items[${index}].price`, 'validation. price_required', 'Harga item wajib diisi');
+    addError(errors, `items[${index}].price`, 'validation.price_required', 'Harga item wajib diisi');
   } else if (typeof price !== 'number' || Number.isNaN(price) || price < 0) {
     addError(errors, `items[${index}].price`, 'validation.price_invalid', 'Harga item harus angka positif');
   }
@@ -30,7 +30,7 @@ function validateItem(item, index, errors) {
     name,
     quantity: typeof quantity === 'number' ? quantity : undefined,
     price: typeof price === 'number' ? price : undefined,
-    note: normalizeString(item?. note) || ''
+    note: normalizeString(item?.note) || ''
   };
 }
 
@@ -38,7 +38,7 @@ function validateAddressAndLocation(body, errors) {
   const address = body.shippingAddress || {};
   const location = body.location || {};
 
-  const province = normalizeString(address. province);
+  const province = normalizeString(address.province);
   const city = normalizeString(address.city);
   const detail = normalizeString(address.detail);
 
@@ -65,14 +65,14 @@ function validateAddressAndLocation(body, errors) {
     shippingAddress: {
       province: province || '',
       city: city || '',
-      district: normalizeString(address. district) || '',
+      district: normalizeString(address.district) || '',
       village: normalizeString(address.village) || '',
       postalCode: normalizeString(address.postalCode) || '',
       detail: detail || '',
     },
     location: {
-      type: normalizeString(location. type) || 'Point',
-      coordinates: numericCoordinates. length === 2 ?  numericCoordinates : [0, 0],
+      type: normalizeString(location.type) || 'Point',
+      coordinates: numericCoordinates.length === 2 ?  numericCoordinates : [0, 0],
     },
   };
 }
@@ -81,18 +81,18 @@ function validateCreateOrder(req, res, next) {
   const errors = [];
   const body = req.body || {};
 
-  const providerId = normalizeString(body. providerId);
+  const providerId = normalizeString(body.providerId);
   
-  const orderType = normalizeString(body. orderType);
+  const orderType = normalizeString(body.orderType);
   if (! orderType || !['direct', 'basic'].includes(orderType)) {
-    addError(errors, 'orderType', 'validation. order_type_invalid', 'Tipe order harus direct atau basic');
+    addError(errors, 'orderType', 'validation.order_type_invalid', 'Tipe order harus direct atau basic');
   }
 
   let items = [];
-  if (! body.items || !Array.isArray(body.items) || body.items. length === 0) {
+  if (! body.items || !Array.isArray(body.items) || body.items.length === 0) {
     addError(errors, 'items', 'validation.items_required', 'Items wajib diisi minimal satu');
   } else {
-    items = body.items. map((item, index) => validateItem(item, index, errors));
+    items = body.items.map((item, index) => validateItem(item, index, errors));
   }
 
   const totalAmount = body.totalAmount;
@@ -102,11 +102,11 @@ function validateCreateOrder(req, res, next) {
     addError(errors, 'totalAmount', 'validation.total_amount_invalid', 'Total belanja harus angka positif');
   }
   
-  const scheduledAt = normalizeString(body. scheduledAt);
+  const scheduledAt = normalizeString(body.scheduledAt);
   if (! scheduledAt) {
     addError(errors, 'scheduledAt', 'validation.scheduled_at_required', 'Tanggal kunjungan wajib diisi');
   } else if (isNaN(Date.parse(scheduledAt))) {
-    addError(errors, 'scheduledAt', 'validation. scheduled_at_invalid', 'Format tanggal kunjungan tidak valid');
+    addError(errors, 'scheduledAt', 'validation.scheduled_at_invalid', 'Format tanggal kunjungan tidak valid');
   } else {
     // [FIX] Bandingkan dengan waktu WIB yang lebih toleran (margin 5 menit)
     const scheduledDate = new Date(scheduledAt);
@@ -124,7 +124,7 @@ function validateCreateOrder(req, res, next) {
   }
 
   req.body = {
-    ... body,
+    ...body,
     orderType,
     providerId,
     items,

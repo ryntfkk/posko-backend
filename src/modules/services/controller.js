@@ -9,7 +9,7 @@ async function listServices(req, res, next) {
     if (category) filter.category = category;
     if (isActive !== undefined) filter.isActive = isActive === 'true';
 
-    const services = await Service.find(filter). lean({ virtuals: true });
+    const services = await Service.find(filter).lean({ virtuals: true });
 
     res.json({ 
       message: 'Daftar layanan', 
@@ -26,11 +26,11 @@ async function createService(req, res, next) {
     const { roles = [] } = req.user || {};
     if (! roles.includes('admin')) {
       return res.status(403).json({ 
-        message: 'Akses ditolak.  Hanya admin yang bisa menambah layanan.' 
+        message: 'Akses ditolak. Hanya admin yang bisa menambah layanan.' 
       });
     }
 
-    const { name, category, basePrice, unit, unitLabel, description, iconUrl } = req. body;
+    const { name, category, basePrice, unit, unitLabel, description, iconUrl } = req.body;
 
     const service = new Service({
       name,
@@ -46,7 +46,7 @@ async function createService(req, res, next) {
 
     res.status(201).json({ 
       message: 'Layanan berhasil dibuat', 
-      data: service. toJSON() 
+      data: service.toJSON() 
     });
   } catch (error) {
     next(error);

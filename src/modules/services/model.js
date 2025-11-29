@@ -195,7 +195,7 @@ serviceSchema.virtual('displayPrice').get(function() {
 });
 
 // Label satuan
-serviceSchema. virtual('displayUnit').get(function() {
+serviceSchema.virtual('displayUnit').get(function() {
   if (this.unitLabel) return this.unitLabel;
   
   const unitLabels = {
@@ -222,10 +222,10 @@ serviceSchema.virtual('priceDisplay').get(function() {
     minimumFractionDigits: 0
   });
   
-  if (this. maxPrice && this.maxPrice > this.basePrice) {
-    return `${formatter.format(this. basePrice)} - ${formatter.format(this. maxPrice)}`;
+  if (this.maxPrice && this.maxPrice > this.basePrice) {
+    return `${formatter.format(this.basePrice)} - ${formatter.format(this.maxPrice)}`;
   }
-  return formatter.format(this. displayPrice);
+  return formatter.format(this.displayPrice);
 });
 
 // Estimasi durasi dalam format readable
@@ -247,7 +247,7 @@ serviceSchema.virtual('discountPercent').get(function() {
 // ===== INDEXES =====
 serviceSchema.index({ slug: 1 });
 serviceSchema.index({ category: 1, isActive: 1 });
-serviceSchema. index({ tags: 1 });
+serviceSchema.index({ tags: 1 });
 serviceSchema.index({ isFeatured: 1, sortOrder: 1 });
 serviceSchema.index({ popularityScore: -1 });
 serviceSchema.index({ '$**': 'text' }); // Full-text search
@@ -255,8 +255,8 @@ serviceSchema.index({ '$**': 'text' }); // Full-text search
 // ===== PRE-SAVE HOOKS =====
 serviceSchema.pre('save', function(next) {
   // Auto-generate slug dari name
-  if (!this.slug || this.isModified('name')) {
-    this.slug = this. name
+  if (! this.slug || this.isModified('name')) {
+    this.slug = this.name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/(^-|-$)/g, '');

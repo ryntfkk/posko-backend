@@ -13,7 +13,7 @@ function validateCreateService(req, res, next) {
 
   const category = normalizeString(body.category);
   if (!category) {
-    addError(errors, 'category', 'validation. category_required', 'Kategori layanan wajib diisi');
+    addError(errors, 'category', 'validation.category_required', 'Kategori layanan wajib diisi');
   }
 
   const basePrice = body.basePrice;
@@ -25,8 +25,8 @@ function validateCreateService(req, res, next) {
 
   // ✅ [BARU] Validasi unit
   const unit = normalizeString(body.unit) || 'unit';
-  if (! VALID_UNITS. includes(unit)) {
-    addError(errors, 'unit', 'validation. unit_invalid', `Satuan tidak valid.  Pilih: ${VALID_UNITS.join(', ')}`);
+  if (! VALID_UNITS.includes(unit)) {
+    addError(errors, 'unit', 'validation.unit_invalid', `Satuan tidak valid. Pilih: ${VALID_UNITS.join(', ')}`);
   }
 
   if (errors.length) {
@@ -39,8 +39,8 @@ function validateCreateService(req, res, next) {
     category, 
     basePrice,
     unit, // ✅ [BARU]
-    unitLabel: normalizeString(body. unitLabel) || '', // ✅ [BARU]
-    description: normalizeString(body. description) || '',
+    unitLabel: normalizeString(body.unitLabel) || '', // ✅ [BARU]
+    description: normalizeString(body.description) || '',
     iconUrl: normalizeString(body.iconUrl) || ''
   };
   

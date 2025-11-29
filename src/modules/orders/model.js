@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const orderItemSchema = new mongoose. Schema({
+const orderItemSchema = new mongoose.Schema({
   serviceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Service', required: true },
   name: { type: String, required: true },
   quantity: { type: Number, default: 1 },
@@ -8,10 +8,10 @@ const orderItemSchema = new mongoose. Schema({
   note: { type: String }
 });
 
-const orderSchema = new mongoose. Schema(
+const orderSchema = new mongoose.Schema(
   {
     userId: {
-      type: mongoose.Schema.Types. ObjectId,
+      type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: [true, 'User is required'],
       index: true // [FIX] Added index
@@ -64,7 +64,7 @@ const orderSchema = new mongoose. Schema(
       },
     },
     rejectedByProviders: [{ 
-      type: mongoose.Schema.Types. ObjectId, 
+      type: mongoose.Schema.Types.ObjectId, 
       ref: 'Provider' 
     }],
     paymentId: { type: String },
@@ -75,7 +75,7 @@ const orderSchema = new mongoose. Schema(
 
 // [FIX] Compound index untuk query yang sering digunakan
 orderSchema.index({ status: 1, orderType: 1, providerId: 1 });
-orderSchema. index({ 'items.serviceId': 1 });
+orderSchema.index({ 'items.serviceId': 1 });
 
 // [FIX] GeoSpatial index untuk pencarian berbasis lokasi
 orderSchema.index({ location: '2dsphere' });
