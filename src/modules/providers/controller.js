@@ -48,7 +48,7 @@ async function listProviders(req, res, next) {
             coordinates: [parseFloat(lng), parseFloat(lat)] 
           },
           distanceField: "distance", 
-          maxDistance: 20000, 
+          maxDistance: 10000, 
           spherical: true,
           query: { roles: 'provider', status: 'active' } 
         }
