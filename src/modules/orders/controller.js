@@ -8,7 +8,6 @@ function getWIBComponents(dateInput) {
   const date = new Date(dateInput);
   if (isNaN(date.getTime())) return null;
   
-  // Gunakan Intl.DateTimeFormat untuk akurasi timezone
   const formatter = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Jakarta',
     year: 'numeric',
@@ -32,11 +31,11 @@ function getWIBComponents(dateInput) {
   return {
     dateOnly: `${getPart('year')}-${getPart('month')}-${getPart('day')}`,
     timeStr: `${getPart('hour')}:${getPart('minute')}`,
-    dayIndex: dayIndexMap[dayOfWeek] ?? 0,
+    dayIndex: dayIndexMap[dayOfWeek] ??  0,
   };
 }
 
-// 1. LIST ALL ORDERS
+// 1.LIST ALL ORDERS
 async function listOrders(req, res, next) {
   try {
     const { roles = [], userId } = req.user || {};
@@ -53,33 +52,33 @@ async function listOrders(req, res, next) {
       }
     } 
     
-    if (roles.includes('admin') && !view) {
+    if (roles.includes('admin') && ! view) {
       filter = {}; 
     }
 
     const orders = await Order.find(filter)
-      .populate('items.serviceId', 'name category iconUrl') // FIXED: Removed space after "items."
-      .populate('userId', 'fullName phoneNumber') // Removed address/location - already in order
+      .populate('items.serviceId', 'name category iconUrl')
+      .populate('userId', 'fullName phoneNumber')
       .populate({
         path: 'providerId',
         select: 'userId rating',
         populate: { path: 'userId', select: 'fullName profilePictureUrl' }
       })
       .sort({ createdAt: -1 })
-      .lean(); // Optimized: Read-only query
+      .lean();
 
     const messageKey = 'orders.list';
-    res.json({ messageKey, message: req.t ? req.t(messageKey) : 'List Orders', data: orders });
+    res.json({ messageKey, message: req.t ?  req.t(messageKey) : 'List Orders', data: orders });
   } catch (error) {
     next(error);
   }
 }
 
-// 2. CREATE ORDER (DENGAN VALIDASI JADWAL)
+// 2.CREATE ORDER (DENGAN FIELD BARU)
 async function createOrder(req, res, next) {
   try {
     const userId = req.user?.userId;
-    if (!userId) {
+    if (! userId) {
       return res.status(401).json({ message: 'Unauthorized' });
     }
 
@@ -90,7 +89,13 @@ async function createOrder(req, res, next) {
       orderType, 
       scheduledAt,
       shippingAddress,
-      location 
+      location,
+      // [BARU] Field tambahan
+      customerContact,
+      orderNote,
+      propertyDetails,
+      scheduledTimeSlot,
+      attachments
     } = req.body;
 
     // --- VALIDASI JADWAL UNTUK DIRECT ORDER ---
@@ -100,13 +105,12 @@ async function createOrder(req, res, next) {
       }
 
       const provider = await Provider.findById(providerId).lean();
-      if (!provider) {
+      if (! provider) {
         return res.status(404).json({ message: 'Mitra tidak ditemukan atau tidak aktif.' });
       }
       
-      // [FIX] Gunakan helper function untuk parsing timezone yang aman
       const scheduled = getWIBComponents(scheduledAt);
-      if (!scheduled) {
+      if (! scheduled) {
         return res.status(400).json({ message: 'Format tanggal kunjungan tidak valid.' });
       }
 
@@ -129,13 +133,12 @@ async function createOrder(req, res, next) {
         const daySchedule = provider.schedule.find(s => s.dayIndex === scheduled.dayIndex);
 
         if (daySchedule) {
-          if (!daySchedule.isOpen) {
+          if (! daySchedule.isOpen) {
             return res.status(400).json({
-              message: `Mitra tutup pada hari yang Anda pilih (${daySchedule.dayName}). `
+              message: `Mitra tutup pada hari yang Anda pilih (${daySchedule.dayName}).`
             });
           }
 
-          // [FIX] Perbandingan waktu yang lebih akurat
           if (scheduled.timeStr < daySchedule.start || scheduled.timeStr > daySchedule.end) {
             return res.status(400).json({
               message: `Waktu kunjungan di luar jam operasional Mitra (${daySchedule.start} - ${daySchedule.end} WIB) pada hari tersebut.`
@@ -145,30 +148,44 @@ async function createOrder(req, res, next) {
       }
     }
 
+    // [BARU] Buat Order dengan field lengkap
     const order = new Order({ 
       userId, 
-      providerId: orderType === 'direct' ? providerId : null, // [FIX] Null untuk basic order
+      providerId: orderType === 'direct' ? providerId : null,
       items, 
       totalAmount, 
       orderType, 
       scheduledAt,
       shippingAddress,
-      location
+      location,
+      // [BARU] Field tambahan
+      customerContact,
+      orderNote: orderNote || '',
+      propertyDetails: propertyDetails || {},
+      scheduledTimeSlot: scheduledTimeSlot || {},
+      attachments: attachments || []
     });
     
     await order.save();
-    res.status(201).json({ message: 'Pesanan berhasil dibuat', data: order });
+    
+    // [BARU] Response termasuk orderNumber
+    res.status(201).json({ 
+      message: 'Pesanan berhasil dibuat', 
+      data: {
+        ...order.toObject(),
+        orderNumber: order.orderNumber // Pastikan orderNumber terlihat
+      }
+    });
   } catch (error) {
     next(error);
   }
 }
 
-// 3. GET ORDER BY ID
+// 3.GET ORDER BY ID (DENGAN FIELD BARU)
 async function getOrderById(req, res, next) {
   try {
     const { orderId } = req.params;
     
-    // [FIX] Removed duplicate populate for providerId
     const order = await Order.findById(orderId)
       .populate('items.serviceId', 'name iconUrl')
       .populate({
@@ -177,7 +194,7 @@ async function getOrderById(req, res, next) {
         populate: { path: 'userId', select: 'fullName phoneNumber profilePictureUrl' }
       })
       .populate('userId', 'fullName phoneNumber profilePictureUrl')
-      .lean(); // Optimized for read-only
+      .lean();
 
     if (!order) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
@@ -188,7 +205,7 @@ async function getOrderById(req, res, next) {
   }
 }
 
-// 4. LIST INCOMING ORDERS
+// 4.LIST INCOMING ORDERS (UNTUK PROVIDER - DENGAN FIELD BARU)
 async function listIncomingOrders(req, res, next) {
   try {
     const userId = req.user.userId;
@@ -202,27 +219,24 @@ async function listIncomingOrders(req, res, next) {
       .filter(s => s.isActive)
       .map(s => s.serviceId);
 
-    // [FIX] Gunakan shippingAddress & location dari Order, bukan dari User
     const orders = await Order.find({
       $or: [
-        // Basic Order: status searching
         { 
           orderType: 'basic', 
           status: 'searching',
           providerId: null, 
           'items.serviceId': { $in: myServiceIds } 
         },
-        // Direct Order: status paid (menunggu konfirmasi provider)
         { 
           providerId: provider._id,
           status: 'paid'
         }
       ]
     })
-    .populate('userId', 'fullName profilePictureUrl phoneNumber') // Only basic info
+    .populate('userId', 'fullName profilePictureUrl phoneNumber')
     .populate('items.serviceId', 'name category iconUrl')
     .sort({ scheduledAt: 1 })
-    .lean(); // Optimized
+    .lean();
 
     res.json({ message: 'Daftar order masuk berhasil diambil', data: orders });
   } catch (error) {
@@ -237,7 +251,7 @@ async function acceptOrder(req, res, next) {
     const userId = req.user.userId;
 
     const provider = await Provider.findOne({ userId }).lean();
-    if (!provider) {
+    if (! provider) {
       return res.status(403).json({ message: 'Akses ditolak.' });
     }
 
@@ -246,9 +260,6 @@ async function acceptOrder(req, res, next) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan.' });
     }
 
-    // [FIX] Hanya izinkan accept untuk order yang sudah dibayar
-    // - Direct Order: status 'paid'
-    // - Basic Order: status 'searching'
     const validStatuses = ['searching', 'paid'];
     if (!validStatuses.includes(order.status)) {
       return res.status(400).json({ 
@@ -256,21 +267,18 @@ async function acceptOrder(req, res, next) {
       });
     }
 
-    // [FIX] Validasi tambahan untuk basic order
     if (order.orderType === 'basic' && order.status !== 'searching') {
       return res.status(400).json({ 
         message: 'Basic order harus dalam status "searching" untuk diterima.' 
       });
     }
 
-    // [FIX] Validasi untuk direct order
     if (order.orderType === 'direct') {
       if (order.status !== 'paid') {
         return res.status(400).json({ 
           message: 'Direct order harus sudah dibayar untuk diterima.' 
         });
       }
-      // Pastikan provider yang accept adalah provider yang dituju
       if (order.providerId && order.providerId.toString() !== provider._id.toString()) {
         return res.status(403).json({ 
           message: 'Order ini ditujukan untuk mitra lain.' 
@@ -282,13 +290,13 @@ async function acceptOrder(req, res, next) {
     order.providerId = provider._id;
     await order.save();
 
-    res.json({ message: 'Pesanan berhasil diterima! Segera hubungi pelanggan. ', data: order });
+    res.json({ message: 'Pesanan berhasil diterima!  Segera hubungi pelanggan.', data: order });
   } catch (error) {
     next(error);
   }
 }
 
-// 6. UPDATE ORDER STATUS
+// 6.UPDATE ORDER STATUS
 async function updateOrderStatus(req, res, next) {
   try {
     const { orderId } = req.params;
@@ -309,9 +317,7 @@ async function updateOrderStatus(req, res, next) {
       return res.status(403).json({ message: 'Anda tidak memiliki akses ke pesanan ini' });
     }
 
-    // --- LOGIKA PERPINDAHAN STATUS ---
-
-    // 1. Provider Selesai Kerja -> waiting_approval
+    // 1.Provider Selesai Kerja -> waiting_approval
     if (status === 'completed' && isProvider) {
       if (order.status !== 'working') {
         return res.status(400).json({ 
@@ -321,14 +327,13 @@ async function updateOrderStatus(req, res, next) {
       order.status = 'waiting_approval';
       await order.save();
       return res.json({ 
-        message: 'Pekerjaan ditandai selesai. Menunggu konfirmasi pelanggan. ', 
+        message: 'Pekerjaan ditandai selesai. Menunggu konfirmasi pelanggan.', 
         data: order 
       });
     }
 
     // 2. Customer Konfirmasi Selesai
     if (status === 'completed' && isCustomer) {
-      // [FIX] Pastikan customer adalah pemilik order yang benar
       if (order.userId.toString() !== userId) {
         return res.status(403).json({ 
           message: 'Anda tidak berhak mengkonfirmasi pesanan ini.' 
@@ -342,26 +347,25 @@ async function updateOrderStatus(req, res, next) {
       }
       order.status = 'completed';
       await order.save();
-      return res.json({ message: 'Pesanan selesai! Terima kasih.', data: order });
+      return res.json({ message: 'Pesanan selesai!  Terima kasih.', data: order });
     }
 
-    // 3. Status Progres (On The Way, Working) - Hanya Provider
+    // 3.Status Progres (On The Way, Working) - Hanya Provider
     if (['on_the_way', 'working'].includes(status)) {
-      if (!isProvider) {
+      if (! isProvider) {
         return res.status(403).json({ 
           message: 'Hanya mitra yang bisa update status ini.' 
         });
       }
       
-      // [FIX] Validasi urutan status
       const statusFlow = {
         'on_the_way': ['accepted'],
         'working': ['on_the_way']
       };
       
-      if (!statusFlow[status].includes(order.status)) {
+      if (! statusFlow[status].includes(order.status)) {
         return res.status(400).json({ 
-          message: `Tidak bisa mengubah status dari "${order.status}" ke "${status}". ` 
+          message: `Tidak bisa mengubah status dari "${order.status}" ke "${status}".` 
         });
       }
       
@@ -370,9 +374,8 @@ async function updateOrderStatus(req, res, next) {
       return res.json({ message: `Status diubah menjadi ${status}`, data: order });
     }
 
-    // 4. Cancel
+    // 4.Cancel
     if (status === 'cancelled') {
-      // [FIX] Lebih spesifik tentang siapa yang bisa cancel
       const nonCancellableStatuses = ['completed', 'working', 'waiting_approval'];
       
       if (nonCancellableStatuses.includes(order.status)) {

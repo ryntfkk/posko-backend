@@ -51,8 +51,7 @@ function validateAddressAndLocation(body, errors) {
   const numericCoordinates = hasCoordinates ?  coordinates.map(Number) : [];
   const coordinatesAreValid = numericCoordinates.every(Number.isFinite);
 
-  // [FIX] Validasi rentang koordinat yang valid
-  if (! hasCoordinates || ! coordinatesAreValid) {
+  if (!hasCoordinates || ! coordinatesAreValid) {
     addError(errors, 'location', 'validation.invalid_coordinates', 'Titik lokasi wajib berupa [longitude, latitude] yang valid');
   } else {
     const [lng, lat] = numericCoordinates;
@@ -72,9 +71,81 @@ function validateAddressAndLocation(body, errors) {
     },
     location: {
       type: normalizeString(location.type) || 'Point',
-      coordinates: numericCoordinates.length === 2 ?  numericCoordinates : [0, 0],
+      coordinates: numericCoordinates.length === 2 ? numericCoordinates : [0, 0],
     },
   };
+}
+
+// [BARU] Validasi Customer Contact (CRITICAL)
+function validateCustomerContact(body, errors) {
+  const contact = body.customerContact || {};
+  
+  const phone = normalizeString(contact.phone);
+  if (!phone) {
+    addError(errors, 'customerContact.phone', 'validation.phone_required', 'Nomor HP wajib diisi');
+  } else if (!/^[0-9+\-\s]{8,15}$/.test(phone.replace(/\s/g, ''))) {
+    addError(errors, 'customerContact.phone', 'validation.phone_invalid', 'Format nomor HP tidak valid');
+  }
+
+  return {
+    name: normalizeString(contact.name) || '',
+    phone: phone || '',
+    alternatePhone: normalizeString(contact.alternatePhone) || ''
+  };
+}
+
+// [BARU] Validasi Property Details (MEDIUM)
+function validatePropertyDetails(body) {
+  const property = body.propertyDetails || {};
+  const validTypes = ['rumah', 'apartemen', 'kantor', 'ruko', 'kendaraan', 'lainnya', ''];
+  
+  return {
+    type: validTypes.includes(property.type) ? property.type : '',
+    floor: typeof property.floor === 'number' && property.floor >= 0 ? property.floor : null,
+    hasParking: typeof property.hasParking === 'boolean' ? property.hasParking : true,
+    hasElevator: typeof property.hasElevator === 'boolean' ? property.hasElevator : false,
+    accessNote: normalizeString(property.accessNote) || ''
+  };
+}
+
+// [BARU] Validasi Scheduled Time Slot (MEDIUM)
+function validateScheduledTimeSlot(body) {
+  const slot = body.scheduledTimeSlot || {};
+  const timeRegex = /^([01]? [0-9]|2[0-3]):[0-5][0-9]$/;
+  
+  return {
+    preferredStart: timeRegex.test(slot.preferredStart) ?  slot.preferredStart : '',
+    preferredEnd: timeRegex.test(slot.preferredEnd) ? slot.preferredEnd : '',
+    isFlexible: typeof slot.isFlexible === 'boolean' ? slot.isFlexible : true
+  };
+}
+
+// [BARU] Validasi Attachments (HIGH)
+function validateAttachments(body, errors) {
+  const attachments = body.attachments || [];
+  
+  if (! Array.isArray(attachments)) {
+    return [];
+  }
+  
+  // Batas maksimal 5 lampiran
+  if (attachments.length > 5) {
+    addError(errors, 'attachments', 'validation.attachments_max', 'Maksimal 5 lampiran per order');
+  }
+  
+  return attachments.slice(0, 5).map((att, index) => {
+    const url = normalizeString(att.url);
+    if (!url) {
+      addError(errors, `attachments[${index}].url`, 'validation.attachment_url_required', 'URL lampiran wajib diisi');
+    }
+    
+    return {
+      url: url || '',
+      type: ['photo', 'video'].includes(att.type) ? att.type : 'photo',
+      description: normalizeString(att.description) || '',
+      uploadedAt: new Date()
+    };
+  }).filter(att => att.url);
 }
 
 function validateCreateOrder(req, res, next) {
@@ -84,7 +155,7 @@ function validateCreateOrder(req, res, next) {
   const providerId = normalizeString(body.providerId);
   
   const orderType = normalizeString(body.orderType);
-  if (! orderType || !['direct', 'basic'].includes(orderType)) {
+  if (!orderType || !['direct', 'basic'].includes(orderType)) {
     addError(errors, 'orderType', 'validation.order_type_invalid', 'Tipe order harus direct atau basic');
   }
 
@@ -108,9 +179,8 @@ function validateCreateOrder(req, res, next) {
   } else if (isNaN(Date.parse(scheduledAt))) {
     addError(errors, 'scheduledAt', 'validation.scheduled_at_invalid', 'Format tanggal kunjungan tidak valid');
   } else {
-    // [FIX] Bandingkan dengan waktu WIB yang lebih toleran (margin 5 menit)
     const scheduledDate = new Date(scheduledAt);
-    const nowWithMargin = new Date(Date.now() - 5 * 60 * 1000); // 5 menit tolerance
+    const nowWithMargin = new Date(Date.now() - 5 * 60 * 1000);
     
     if (scheduledDate < nowWithMargin) {
       addError(errors, 'scheduledAt', 'validation.scheduled_at_past', 'Tanggal kunjungan tidak boleh di masa lalu');
@@ -118,6 +188,18 @@ function validateCreateOrder(req, res, next) {
   }
   
   const { shippingAddress, location } = validateAddressAndLocation(body, errors);
+  
+  // [BARU] Validasi field tambahan
+  const customerContact = validateCustomerContact(body, errors);
+  const propertyDetails = validatePropertyDetails(body);
+  const scheduledTimeSlot = validateScheduledTimeSlot(body);
+  const attachments = validateAttachments(body, errors);
+  const orderNote = normalizeString(body.orderNote) || '';
+  
+  // Validasi panjang orderNote
+  if (orderNote.length > 500) {
+    addError(errors, 'orderNote', 'validation.order_note_too_long', 'Catatan order maksimal 500 karakter');
+  }
 
   if (errors.length) {
     return respondValidationErrors(req, res, errors);
@@ -132,6 +214,12 @@ function validateCreateOrder(req, res, next) {
     scheduledAt: new Date(scheduledAt),
     shippingAddress,
     location,
+    // [BARU] Field tambahan
+    customerContact,
+    propertyDetails,
+    scheduledTimeSlot,
+    attachments,
+    orderNote: orderNote.slice(0, 500),
   };
 
   return next();
