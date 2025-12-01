@@ -40,7 +40,14 @@ const voucherSchema = new mongoose.Schema({
   quota: { 
     type: Number, 
     default: 0 
-  }
+  },
+  // [BARU] Field untuk membatasi layanan spesifik
+  // Jika array kosong [] = Berlaku untuk SEMUA layanan
+  // Jika terisi = Hanya berlaku untuk Service ID yang ada di list
+  applicableServices: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Service'
+  }]
 }, { timestamps: true });
 
 module.exports = mongoose.model('Voucher', voucherSchema);
