@@ -1,3 +1,4 @@
+// src/modules/auth/controller.js
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const env = require('../../config/env');
@@ -16,16 +17,50 @@ function sanitizeUser(userDoc) {
 function generateTokens(user) {
   const payload = {
     userId: user._id,
-    email: user.email,           // [UPDATE] Menambahkan email ke payload
+    email: user.email,
     roles: user.roles,
     activeRole: user.activeRole,
-    role: user.activeRole,       // [UPDATE] Menambahkan alias 'role' agar kompatibel dengan validasi tunggal
+    role: user.activeRole,
   };
 
   const accessToken = jwt.sign(payload, env.jwtSecret, { expiresIn: '15m' });
   const refreshToken = jwt.sign(payload, env.jwtRefreshSecret, { expiresIn: '7d' });
 
   return { accessToken, refreshToken };
+}
+
+// [HELPER] Set Cookies untuk Middleware Frontend
+function setAuthCookies(res, accessToken, refreshToken) {
+  const isProduction = env.nodeEnv === 'production';
+  
+  // Cookie untuk Access Token (dibaca oleh Middleware)
+  res.cookie('posko_token', accessToken, {
+    httpOnly: true, // Tidak bisa diakses JS client (aman dari XSS)
+    secure: isProduction, // HTTPS only di production
+    sameSite: isProduction ? 'none' : 'lax', // Cross-site cookie handling
+    maxAge: 15 * 60 * 1000 // 15 menit
+  });
+
+  // Cookie untuk Refresh Token
+  res.cookie('posko_refresh_token', refreshToken, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'lax',
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 hari
+  });
+}
+
+// [HELPER] Clear Cookies saat Logout
+function clearAuthCookies(res) {
+  const isProduction = env.nodeEnv === 'production';
+  const cookieOptions = {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'lax'
+  };
+
+  res.clearCookie('posko_token', cookieOptions);
+  res.clearCookie('posko_refresh_token', cookieOptions);
 }
 
 // [FIX] Helper untuk handling MongoDB duplicate key error
@@ -80,6 +115,9 @@ async function register(req, res, next) {
     user.refreshTokens = [refreshToken]; // Reset, hanya simpan token terbaru
     await user.save();
     
+    // [NEW] Set Cookies
+    setAuthCookies(res, accessToken, refreshToken);
+
     const messageKey = 'auth.register_success';
     const safeUser = sanitizeUser(user);
     
@@ -155,6 +193,9 @@ async function login(req, res, next) {
     user.refreshTokens.push(refreshToken);
     await user.save();
     
+    // [NEW] Set Cookies
+    setAuthCookies(res, accessToken, refreshToken);
+
     console.log(`Login success for: ${email}`); // [DEBUG]
 
     const messageKey = 'auth.login_success';
@@ -179,7 +220,12 @@ async function login(req, res, next) {
 // ===================
 async function refreshToken(req, res, next) {
   try {
-    const { refreshToken } = req.body;
+    // Support ambil token dari body atau cookie
+    const refreshToken = req.body.refreshToken || req.cookies?.posko_refresh_token;
+
+    if (!refreshToken) {
+      return res.status(400).json({ message: 'Refresh Token required' });
+    }
 
     // 1. Verify Refresh Token
     let decoded;
@@ -225,6 +271,9 @@ async function refreshToken(req, res, next) {
     
     await user.save();
 
+    // [NEW] Set Cookies
+    setAuthCookies(res, newTokens.accessToken, newTokens.refreshToken);
+
     res.json({
       messageKey: 'auth.token_refreshed',
       message: 'Token berhasil diperbarui.',
@@ -242,7 +291,7 @@ async function refreshToken(req, res, next) {
 // ===================
 async function logout(req, res, next) {
   try {
-    const { refreshToken } = req.body;
+    const refreshToken = req.body.refreshToken || req.cookies?.posko_refresh_token;
     const userId = req.user.userId;
 
     const user = await User.findById(userId);
@@ -251,6 +300,9 @@ async function logout(req, res, next) {
       user.refreshTokens = user.refreshTokens.filter(t => t !== refreshToken);
       await user.save();
     }
+
+    // [NEW] Clear Cookies
+    clearAuthCookies(res);
 
     res.json({
       messageKey: 'auth.logout_success',
@@ -316,6 +368,9 @@ async function switchRole(req, res, next) {
 
     const { accessToken, refreshToken } = generateTokens(user);
 
+    // [NEW] Set Cookies
+    setAuthCookies(res, accessToken, refreshToken);
+
     res.json({
       message: `Berhasil beralih ke mode ${role}`,
       data: {
@@ -359,6 +414,9 @@ async function registerPartner(req, res, next) {
     }
 
     const { accessToken, refreshToken } = generateTokens(user);
+
+    // [NEW] Set Cookies
+    setAuthCookies(res, accessToken, refreshToken);
 
     res.json({
       message: 'Selamat! Anda berhasil mendaftar sebagai Mitra.',

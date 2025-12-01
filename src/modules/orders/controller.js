@@ -1,6 +1,7 @@
 // src/modules/orders/controller.js
 const Order = require('./model');
 const Provider = require('../providers/model');
+const Service = require('../services/model'); // [SECURITY FIX] Import Service Model
 
 // [CONFIG] Default Timezone Configuration
 // Idealnya offset dan timezone ini diambil dari profil Provider/User
@@ -79,7 +80,7 @@ async function listOrders(req, res, next) {
   }
 }
 
-// 2.CREATE ORDER (UPDATED: Validasi Zona Waktu & Double Booking)
+// 2.CREATE ORDER (UPDATED: Validasi Zona Waktu & Double Booking & Price Security)
 async function createOrder(req, res, next) {
   try {
     const userId = req.user?.userId;
@@ -90,7 +91,7 @@ async function createOrder(req, res, next) {
     const { 
       providerId, 
       items = [], 
-      totalAmount = 0, 
+      // [SECURITY FIX] totalAmount dari body diabaikan/tidak diambil
       orderType, 
       scheduledAt,
       shippingAddress,
@@ -101,6 +102,39 @@ async function createOrder(req, res, next) {
       scheduledTimeSlot,
       attachments
     } = req.body;
+
+    // --- SECURITY CHECK: CALCULATE PRICE FROM DB ---
+    let calculatedTotalAmount = 0;
+    const validatedItems = [];
+
+    if (items.length === 0) {
+      return res.status(400).json({ message: 'Items tidak boleh kosong' });
+    }
+
+    // Loop through items dan ambil harga asli dari DB
+    for (const item of items) {
+      if (!item.serviceId) continue;
+
+      const serviceDoc = await Service.findById(item.serviceId);
+      if (!serviceDoc) {
+        return res.status(400).json({ message: `Service ID ${item.serviceId} tidak ditemukan.` });
+      }
+
+      const quantity = parseInt(item.quantity) || 1;
+      const realPrice = serviceDoc.price;
+      const subTotal = realPrice * quantity;
+
+      calculatedTotalAmount += subTotal;
+
+      validatedItems.push({
+        serviceId: serviceDoc._id,
+        name: serviceDoc.name, // Simpan nama snapshot agar aman jika nama service berubah nanti
+        price: realPrice,      // Gunakan harga dari DB
+        quantity: quantity,
+        note: item.note || ''
+      });
+    }
+    // ------------------------------------------------
 
     // --- VALIDASI JADWAL UNTUK DIRECT ORDER ---
     if (orderType === 'direct') {
@@ -167,8 +201,8 @@ async function createOrder(req, res, next) {
     const order = new Order({ 
       userId, 
       providerId: orderType === 'direct' ? providerId : null,
-      items, 
-      totalAmount, 
+      items: validatedItems,          // [SECURE] Gunakan items yang sudah divalidasi
+      totalAmount: calculatedTotalAmount, // [SECURE] Gunakan total yang dihitung di server
       orderType, 
       scheduledAt,
       shippingAddress,
