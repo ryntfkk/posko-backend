@@ -1,3 +1,4 @@
+// src/modules/providers/controller.js
 const Provider = require('./model');
 const User = require('../../models/User');
 const Service = require('../services/model');
@@ -6,7 +7,6 @@ const Order = require('../orders/model');
 const { Types } = require('mongoose');
 
 // Helper: Ambil tanggal-tanggal yang sudah dibooking (Order Aktif)
-// [FIX] Gunakan 'scheduledAt' bukan 'orderDate' - sesuai Order schema
 async function getBookedDates(providerId) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -112,8 +112,6 @@ async function listProviders(req, res, next) {
         .trim()
         .replace(/-/g, ' ');
 
-      console.log(`[CATEGORY FILTER] Original: "${category}", Normalized: "${normalizedCategory}"`);
-
       pipeline.push({
         $addFields: {
           hasMatchingService: {
@@ -196,7 +194,7 @@ async function listProviders(req, res, next) {
         blockedDates: '$providerInfo.blockedDates',
         portfolioImages: '$providerInfo.portfolioImages',
         totalCompletedOrders: '$providerInfo.totalCompletedOrders',
-        schedule: '$providerInfo.schedule',
+        // schedule: '$providerInfo.schedule', // [DIHAPUS] Tidak lagi dikirim
         createdAt: '$providerInfo.createdAt',
         distance: '$distance'
       }
@@ -209,9 +207,6 @@ async function listProviders(req, res, next) {
       select: 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent',
       model: Service
     });
-
-    const filterInfo = isValidCategory ? `category: "${category}"` : 'no category filter';
-    console.log(`[PROVIDERS RESULT] Found ${providers.length} providers (${filterInfo})`);
 
     res.json({
       messageKey: 'providers.list',
@@ -253,6 +248,7 @@ async function getProviderById(req, res, next) {
     const providerData = provider.toObject();
     providerData.bookedDates = bookedDates;
     providerData.totalCompletedOrders = totalCompletedOrders;
+    delete providerData.schedule; // [DIHAPUS] Membersihkan output
 
     res.json({
       messageKey: 'providers.detail',
@@ -280,6 +276,7 @@ async function getProviderMe(req, res, next) {
     const providerData = provider.toObject();
     providerData.bookedDates = bookedDates;
     providerData.totalCompletedOrders = totalCompletedOrders;
+    delete providerData.schedule; // [DIHAPUS] Membersihkan output
 
     res.json({
       messageKey: 'providers.me',
@@ -370,7 +367,7 @@ async function updatePortfolio(req, res, next) {
   }
 }
 
-// [NEW] Update Provider Services
+// Update Provider Services
 async function updateProviderServices(req, res, next) {
   try {
     const userId = req.user.userId;
@@ -401,35 +398,7 @@ async function updateProviderServices(req, res, next) {
   }
 }
 
-// [NEW] Update Provider Schedule (Jam Operasional)
-async function updateSchedule(req, res, next) {
-  try {
-    const userId = req.user.userId;
-    const { schedule } = req.body;
-
-    if (!Array.isArray(schedule)) {
-      return res.status(400).json({ message: 'Format jadwal tidak valid' });
-    }
-
-    const provider = await Provider.findOne({ userId });
-    if (! provider) {
-      return res.status(404).json({ message: 'Profil mitra tidak ditemukan' });
-    }
-
-    provider.schedule = schedule;
-    await provider.save();
-
-    res.json({
-      messageKey: 'providers.schedule.updated',
-      message: 'Jadwal operasional berhasil diperbarui',
-      data: provider.schedule
-    });
-  } catch (error) {
-    next(error);
-  }
-}
-
-// [NEW] Toggle Online Status
+// Toggle Online Status
 async function toggleOnlineStatus(req, res, next) {
   try {
     const userId = req.user.userId;
@@ -453,6 +422,8 @@ async function toggleOnlineStatus(req, res, next) {
   }
 }
 
+// [DIHAPUS] Function updateSchedule sudah dihapus
+
 module.exports = {
   listProviders,
   getProviderById,
@@ -461,6 +432,5 @@ module.exports = {
   updateAvailability,
   updatePortfolio,
   updateProviderServices,
-  updateSchedule,
   toggleOnlineStatus
 };

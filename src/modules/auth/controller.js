@@ -16,8 +16,10 @@ function sanitizeUser(userDoc) {
 function generateTokens(user) {
   const payload = {
     userId: user._id,
+    email: user.email,           // [UPDATE] Menambahkan email ke payload
     roles: user.roles,
     activeRole: user.activeRole,
+    role: user.activeRole,       // [UPDATE] Menambahkan alias 'role' agar kompatibel dengan validasi tunggal
   };
 
   const accessToken = jwt.sign(payload, env.jwtSecret, { expiresIn: '15m' });

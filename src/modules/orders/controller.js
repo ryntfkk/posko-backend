@@ -1,3 +1,4 @@
+// src/modules/orders/controller.js
 const Order = require('./model');
 const Provider = require('../providers/model');
 
@@ -21,17 +22,9 @@ function getWIBComponents(dateInput) {
   const parts = formatter.formatToParts(date);
   const getPart = (type) => parts.find(p => p.type === type)?.value || '';
   
-  const dayOfWeek = new Intl.DateTimeFormat('en-US', { 
-    timeZone: 'Asia/Jakarta', 
-    weekday: 'short' 
-  }).format(date);
-  
-  const dayIndexMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-  
   return {
     dateOnly: `${getPart('year')}-${getPart('month')}-${getPart('day')}`,
     timeStr: `${getPart('hour')}:${getPart('minute')}`,
-    dayIndex: dayIndexMap[dayOfWeek] ??  0,
   };
 }
 
@@ -74,7 +67,7 @@ async function listOrders(req, res, next) {
   }
 }
 
-// 2.CREATE ORDER (DENGAN FIELD BARU)
+// 2.CREATE ORDER (UPDATED: Tambah Validasi Double Booking)
 async function createOrder(req, res, next) {
   try {
     const userId = req.user?.userId;
@@ -90,7 +83,6 @@ async function createOrder(req, res, next) {
       scheduledAt,
       shippingAddress,
       location,
-      // [BARU] Field tambahan
       customerContact,
       orderNote,
       propertyDetails,
@@ -114,7 +106,7 @@ async function createOrder(req, res, next) {
         return res.status(400).json({ message: 'Format tanggal kunjungan tidak valid.' });
       }
 
-      // Cek apakah tanggal diblokir manual oleh Provider
+      // Validasi 1: Cek apakah tanggal diblokir manual oleh Provider (Kalender Libur)
       if (provider.blockedDates && provider.blockedDates.length > 0) {
         const isBlocked = provider.blockedDates.some(blockedDate => {
           const blocked = getWIBComponents(blockedDate);
@@ -123,32 +115,32 @@ async function createOrder(req, res, next) {
         
         if (isBlocked) {
           return res.status(400).json({
-            message: 'Tanggal kunjungan ini diblokir manual oleh Mitra. Pilih tanggal lain.'
+            message: 'Tanggal kunjungan ini diblokir manual oleh Mitra (Libur). Pilih tanggal lain.'
           });
         }
       }
-      
-      // Cek Jadwal Harian (Jam Operasional)
-      if (provider.schedule && provider.schedule.length > 0) {
-        const daySchedule = provider.schedule.find(s => s.dayIndex === scheduled.dayIndex);
 
-        if (daySchedule) {
-          if (! daySchedule.isOpen) {
-            return res.status(400).json({
-              message: `Mitra tutup pada hari yang Anda pilih (${daySchedule.dayName}).`
-            });
-          }
+      // Validasi 2: Cek apakah tanggal sudah ada pesanan aktif (Double Booking Prevention)
+      // Kita cek range waktu dalam satu hari tersebut (00:00 - 23:59 WIB)
+      const dateStart = new Date(scheduled.dateOnly + 'T00:00:00.000+07:00');
+      const dateEnd = new Date(scheduled.dateOnly + 'T23:59:59.999+07:00');
 
-          if (scheduled.timeStr < daySchedule.start || scheduled.timeStr > daySchedule.end) {
-            return res.status(400).json({
-              message: `Waktu kunjungan di luar jam operasional Mitra (${daySchedule.start} - ${daySchedule.end} WIB) pada hari tersebut.`
-            });
-          }
+      const existingOrder = await Order.findOne({
+        providerId: providerId,
+        status: { $in: ['paid', 'accepted', 'on_the_way', 'working', 'waiting_approval'] }, // Status yang dianggap "Booking Aktif"
+        scheduledAt: {
+          $gte: dateStart,
+          $lte: dateEnd
         }
+      });
+
+      if (existingOrder) {
+        return res.status(400).json({
+          message: 'Mitra sudah penuh/memiliki jadwal lain pada tanggal tersebut. Silakan pilih tanggal lain.'
+        });
       }
     }
 
-    // [BARU] Buat Order dengan field lengkap
     const order = new Order({ 
       userId, 
       providerId: orderType === 'direct' ? providerId : null,
@@ -158,7 +150,6 @@ async function createOrder(req, res, next) {
       scheduledAt,
       shippingAddress,
       location,
-      // [BARU] Field tambahan
       customerContact,
       orderNote: orderNote || '',
       propertyDetails: propertyDetails || {},
@@ -168,12 +159,11 @@ async function createOrder(req, res, next) {
     
     await order.save();
     
-    // [BARU] Response termasuk orderNumber
     res.status(201).json({ 
       message: 'Pesanan berhasil dibuat', 
       data: {
         ...order.toObject(),
-        orderNumber: order.orderNumber // Pastikan orderNumber terlihat
+        orderNumber: order.orderNumber
       }
     });
   } catch (error) {
@@ -181,7 +171,7 @@ async function createOrder(req, res, next) {
   }
 }
 
-// 3.GET ORDER BY ID (DENGAN FIELD BARU)
+// 3.GET ORDER BY ID
 async function getOrderById(req, res, next) {
   try {
     const { orderId } = req.params;
@@ -205,7 +195,7 @@ async function getOrderById(req, res, next) {
   }
 }
 
-// 4.LIST INCOMING ORDERS (UNTUK PROVIDER - DENGAN FIELD BARU)
+// 4.LIST INCOMING ORDERS
 async function listIncomingOrders(req, res, next) {
   try {
     const userId = req.user.userId;
@@ -317,7 +307,6 @@ async function updateOrderStatus(req, res, next) {
       return res.status(403).json({ message: 'Anda tidak memiliki akses ke pesanan ini' });
     }
 
-    // 1.Provider Selesai Kerja -> waiting_approval
     if (status === 'completed' && isProvider) {
       if (order.status !== 'working') {
         return res.status(400).json({ 
@@ -332,7 +321,6 @@ async function updateOrderStatus(req, res, next) {
       });
     }
 
-    // 2. Customer Konfirmasi Selesai
     if (status === 'completed' && isCustomer) {
       if (order.userId.toString() !== userId) {
         return res.status(403).json({ 
@@ -350,7 +338,6 @@ async function updateOrderStatus(req, res, next) {
       return res.json({ message: 'Pesanan selesai!  Terima kasih.', data: order });
     }
 
-    // 3.Status Progres (On The Way, Working) - Hanya Provider
     if (['on_the_way', 'working'].includes(status)) {
       if (! isProvider) {
         return res.status(403).json({ 
@@ -374,7 +361,6 @@ async function updateOrderStatus(req, res, next) {
       return res.json({ message: `Status diubah menjadi ${status}`, data: order });
     }
 
-    // 4.Cancel
     if (status === 'cancelled') {
       const nonCancellableStatuses = ['completed', 'working', 'waiting_approval'];
       
