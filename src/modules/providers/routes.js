@@ -6,6 +6,13 @@ const authenticate = require('../../middlewares/auth');
 
 const router = express.Router();
 
+// PUT /api/providers/services (Update Services)
+router.put('/services', authenticate, controller.updateProviderServices);
+
+// --- TAMBAHKAN BARIS INI ---
+// PUT /api/providers/online-status (Toggle Online/Offline)
+router.put('/online-status', authenticate, controller.toggleOnlineStatus);
+
 // GET /api/providers/ (List semua - Public)
 router.get('/', controller.listProviders);
 
