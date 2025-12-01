@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const voucherController = require('./controller');
-const { authenticate } = require('../../middlewares/auth'); // Pastikan path middleware auth benar
+const authenticate = require('../../middlewares/auth'); 
 const { validateVoucherCheck, validateVoucherClaim } = require('./validators');
-const { runValidation } = require('../../middlewares/validator'); // Helper validator runner Anda
+const { runValidation } = require('../../middlewares/validator'); 
 
 // 1. [PUBLIC] List Voucher Marketplace (Yang bisa diklaim)
 // Bisa diakses tanpa login (opsional) atau dengan login.

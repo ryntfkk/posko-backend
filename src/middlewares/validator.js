@@ -18,4 +18,21 @@ function validateBody(requiredFields = []) {
   };
 }
 
-module.exports = { validateBody };
+// [TAMBAHAN] Middleware untuk menangkap error dari express-validator
+function runValidation(req, res, next) {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({
+      messageKey: 'validation.invalid_payload',
+      message: 'Data yang dikirim tidak valid',
+      errors: errors.array().map(err => ({
+        field: err.path,
+        message: err.msg
+      }))
+    });
+  }
+  next();
+}
+
+// Update module.exports
+module.exports = { validateBody, runValidation };
