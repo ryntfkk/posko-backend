@@ -6,9 +6,26 @@ const { checkMidtransConfig } = require('../../utils/midtransConfig');
 
 async function listPayments(req, res, next) {
   try {
-    const payments = await Payment.find().populate('orderId');
+    const userId = req.user.userId;
+    
+    // [FIXED] Only show payments for orders belonging to the authenticated user
+    const payments = await Payment.find()
+      .populate({
+        path: 'orderId',
+        match: { userId: userId },
+        select: 'userId totalAmount status'
+      })
+      .lean();
+    
+    // Filter out payments where orderId is null (user doesn't own that order)
+    const userPayments = payments.filter(p => p.orderId !== null);
+    
     const messageKey = 'payments.list';
-    res.json({ messageKey, message: req.t ? req.t(messageKey) : 'Payment List', data: payments });
+    res.json({ 
+      messageKey, 
+      message: req.t ?  req.t(messageKey) : 'Payment List', 
+      data: userPayments 
+    });
   } catch (error) {
     next(error);
   }
@@ -16,7 +33,7 @@ async function listPayments(req, res, next) {
 
 async function createPayment(req, res, next) {
   try {
-        const { isConfigured, missingKeys } = checkMidtransConfig();
+    const { isConfigured, missingKeys } = checkMidtransConfig();
     if (!isConfigured) {
       return res.status(503).json({
         message: 'Payment service is temporarily unavailable due to incomplete configuration.',
@@ -25,16 +42,24 @@ async function createPayment(req, res, next) {
     }
     
     const { orderId } = req.body;
+    const userId = req.user.userId;
 
-    // 1. Ambil Data Order
+    // 1.Ambil Data Order
     const order = await Order.findById(orderId).populate('userId');
     if (!order) {
       return res.status(404).json({ message: 'Order tidak ditemukan' });
     }
 
-    // 2. Buat Order ID unik untuk Midtrans
+    // [FIXED] Validate that the order belongs to the authenticated user
+    if (order.userId._id.toString() !== userId) {
+      return res.status(403).json({ 
+        message: 'Anda tidak memiliki akses untuk membayar order ini' 
+      });
+    }
+
+    // 2.Buat Order ID unik untuk Midtrans
     const midtransOrderId = `POSKO-${order._id}-${Date.now()}`;
-    const currentBaseUrl = process.env.CLIENT_URL || "http://localhost:3000"; // Gunakan env jika ada
+    const currentBaseUrl = process.env.FRONTEND_CUSTOMER_URL || "http://localhost:3000";
     
     const transactionDetails = {
       transaction_details: {
@@ -96,13 +121,13 @@ async function handleNotification(req, res, next) {
     const splitOrderId = orderIdFull.split('-');
     const realOrderId = splitOrderId[1]; 
 
-    // 2. Validasi ID MongoDB
+    // 2.Validasi ID MongoDB
     if (!realOrderId || !mongoose.Types.ObjectId.isValid(realOrderId)) {
         console.log(`⚠️ Ignored invalid Order ID: ${realOrderId}`);
         return res.status(200).json({ message: 'Invalid Order ID ignored' });
     }
 
-    // 3. Tentukan Status Pembayaran
+    // 3.Tentukan Status Pembayaran
     let paymentStatus = 'pending';
     if (transactionStatus == 'capture') {
         if (fraudStatus == 'challenge') {
@@ -118,7 +143,7 @@ async function handleNotification(req, res, next) {
 
     console.log(`🔔 Webhook: ${realOrderId} status ${paymentStatus} (${transactionStatus})`);
 
-    // 4. Update Database
+    // 4.Update Database
     if (paymentStatus === 'paid') {
         await Payment.findOneAndUpdate({ orderId: realOrderId }, { status: 'paid' });
         

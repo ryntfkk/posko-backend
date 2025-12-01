@@ -22,9 +22,9 @@ const missingMidtransKeys = midtransKeys.filter(
 
 if (missingMidtransKeys.length > 0) {
   console.warn(
-    `Midtrans configuration is incomplete. Missing keys: ${missingMidtransKeys.join(
+    `Midtrans configuration is incomplete.Missing keys: ${missingMidtransKeys.join(
       ', '
-    )}. Payment features may be disabled.`
+    )}.Payment features may be disabled.`
   );
 }
 
@@ -36,6 +36,30 @@ function sanitizeKey(key) {
     clean = clean.slice(1, -1);
   }
   return clean;
+}
+
+// Build CORS origins array from environment variables
+function getCorsOrigins() {
+  const origins = [];
+  
+  if (process.env.FRONTEND_CUSTOMER_URL) {
+    origins.push(process.env.FRONTEND_CUSTOMER_URL.trim());
+  }
+  
+  if (process.env.FRONTEND_PROVIDER_URL) {
+    origins.push(process.env.FRONTEND_PROVIDER_URL.trim());
+  }
+  
+  if (process.env.FRONTEND_ADMIN_URL) {
+    origins.push(process.env.FRONTEND_ADMIN_URL.trim());
+  }
+  
+  // Development fallback
+  if (process.env.NODE_ENV === 'development' && origins.length === 0) {
+    origins.push('http://localhost:3000', 'http://localhost:3001', 'http://localhost:3002');
+  }
+  
+  return origins;
 }
 
 const config = {
@@ -54,6 +78,9 @@ const config = {
   midtransIsProduction: process.env.MIDTRANS_IS_PRODUCTION !== undefined 
     ? process.env.MIDTRANS_IS_PRODUCTION === 'false' 
     : undefined,
+
+  // [NEW] CORS Origins Configuration
+  corsOrigins: getCorsOrigins(),
 };
 
 module.exports = config;

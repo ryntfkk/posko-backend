@@ -22,18 +22,35 @@ const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
 
-// Konfigurasi CORS (Penting agar Frontend Vercel bisa akses)
-app.use(cors({
-  origin: '*', // Di production sebaiknya ganti dengan URL Frontend
-  credentials: true
-}));
+// [FIXED] Konfigurasi CORS dengan multiple origins yang aman
+const corsOptions = {
+  origin: function (origin, callback) {
+    const allowedOrigins = env.corsOrigins;
+    
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`⚠️ CORS blocked request from origin: ${origin}`);
+      callback(new Error('Not allowed by CORS policy'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
 
 app.use(i18nMiddleware);
 app.use(express.json());
 
 // Health Check
 app.get('/', (req, res) => {
-  res.status(200).send('Posko Backend Vercel is Running!');
+  res.status(200).send('Posko Backend Vercel is Running! ');
 });
 
 // Database Health Check Endpoint
@@ -71,15 +88,16 @@ module.exports = app;
 
 // --- JALANKAN SERVER UNTUK LOCALHOST SAJA ---
 // Kode di bawah ini HANYA jalan kalau dijalankan di laptop (node src/index.js)
-// Di Vercel, kode di bawah ini akan diabaikan (karena require.main !== module)
+// Di Vercel, kode di bawah ini akan diabaikan (karena require. main !== module)
 if (require.main === module) {
   const server = http.createServer(app);
-  const PORT = process.env.PORT || 3000;
+  const PORT = process.env.PORT || 4000;
   
   // Socket hanya jalan di local
   initSocket(server);
 
   server.listen(PORT, () => {
     console.log(`🚀 Server Local berjalan di port ${PORT}`);
+    console.log(`✅ CORS Origins diizinkan: ${env.corsOrigins.join(', ')}`);
   });
 }
