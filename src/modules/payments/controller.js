@@ -1,3 +1,4 @@
+// src/modules/payments/controller.js
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const Payment = require('./model');
@@ -10,7 +11,7 @@ async function listPayments(req, res, next) {
   try {
     const userId = req.user.userId;
     
-    // [FIXED] Only show payments for orders belonging to the authenticated user
+    // Only show payments for orders belonging to the authenticated user
     const payments = await Payment.find()
       .populate({
         path: 'orderId',
@@ -52,7 +53,7 @@ async function createPayment(req, res, next) {
       return res.status(404).json({ message: 'Order tidak ditemukan' });
     }
 
-    // [FIXED] Validate that the order belongs to the authenticated user
+    // Validate that the order belongs to the authenticated user
     if (order.userId._id.toString() !== userId) {
       return res.status(403).json({ 
         message: 'Anda tidak memiliki akses untuk membayar order ini' 
@@ -116,25 +117,30 @@ async function handleNotification(req, res, next) {
     const notification = req.body;
     
     // [SECURITY FIX] Verifikasi Signature Key Midtrans
-    // Signature validasi: SHA512(order_id + status_code + gross_amount + ServerKey)
+    // Pastikan gross_amount dikonversi ke string tanpa desimal .00 jika integer di DB, 
+    // atau biarkan sesuai format Midtrans jika perlu.
+    // Midtrans biasanya mengirim gross_amount sebagai string dengan .00 (misal: "15000.00")
+    
     const { order_id, status_code, gross_amount, signature_key } = notification;
     const serverKey = env.midtransKey;
 
     if (!signature_key || !order_id || !status_code || !gross_amount) {
-        // Jangan memberikan detail error terlalu spesifik ke publik, cukup log di server
         console.error('❌ Invalid notification payload:', notification);
         return res.status(400).json({ message: 'Invalid notification payload' });
     }
 
+    // Pastikan gross_amount sesuai format yang dikirim Midtrans (biasanya string)
+    // Hati-hati: jangan parse ke int lalu string lagi jika Midtrans kirim desimal.
+    // Kita gunakan nilai mentah dari notification.
     const signatureInput = `${order_id}${status_code}${gross_amount}${serverKey}`;
     const expectedSignature = crypto.createHash('sha512').update(signatureInput).digest('hex');
 
     if (signature_key !== expectedSignature) {
         console.error(`🚨 Security Alert: Invalid Signature detected! Order: ${order_id}`);
+        // Return 403 atau 200 (untuk mencegah retry spam midtrans jika yakin invalid)
         return res.status(403).json({ message: 'Invalid signature key' });
     }
 
-    // Lanjut proses jika signature valid
     const transactionStatus = notification.transaction_status;
     const fraudStatus = notification.fraud_status;
     const orderIdFull = notification.order_id; 
@@ -182,8 +188,6 @@ async function handleNotification(req, res, next) {
         }
     } else if (paymentStatus === 'failed') {
         await Payment.findOneAndUpdate({ orderId: realOrderId }, { status: 'failed' });
-        // Jika gagal bayar, kembalikan ke pending atau batalkan tergantung aturan bisnis
-        // Di sini kita set cancelled agar user buat order ulang (karena order ID Midtrans unik)
         await Order.findByIdAndUpdate(realOrderId, { status: 'cancelled' });
     }
 

@@ -1,11 +1,9 @@
 // src/modules/orders/controller.js
 const Order = require('./model');
 const Provider = require('../providers/model');
-const Service = require('../services/model'); // [SECURITY FIX] Import Service Model
+const Service = require('../services/model');
 
 // [CONFIG] Default Timezone Configuration
-// Idealnya offset dan timezone ini diambil dari profil Provider/User
-// Saat ini kita sentralisasi di sini agar mudah diubah (Support WIB/UTC+7)
 const DEFAULT_TIMEZONE = 'Asia/Jakarta';
 const DEFAULT_OFFSET = '+07:00'; 
 
@@ -80,7 +78,7 @@ async function listOrders(req, res, next) {
   }
 }
 
-// 2.CREATE ORDER (UPDATED: Validasi Zona Waktu & Double Booking & Price Security)
+// 2.CREATE ORDER
 async function createOrder(req, res, next) {
   try {
     const userId = req.user?.userId;
@@ -91,7 +89,6 @@ async function createOrder(req, res, next) {
     const { 
       providerId, 
       items = [], 
-      // [SECURITY FIX] totalAmount dari body diabaikan/tidak diambil
       orderType, 
       scheduledAt,
       shippingAddress,
@@ -121,15 +118,15 @@ async function createOrder(req, res, next) {
       }
 
       const quantity = parseInt(item.quantity) || 1;
-      const realPrice = serviceDoc.price;
+      const realPrice = serviceDoc.price || serviceDoc.basePrice; // Fallback ke basePrice jika price undefined
       const subTotal = realPrice * quantity;
 
       calculatedTotalAmount += subTotal;
 
       validatedItems.push({
         serviceId: serviceDoc._id,
-        name: serviceDoc.name, // Simpan nama snapshot agar aman jika nama service berubah nanti
-        price: realPrice,      // Gunakan harga dari DB
+        name: serviceDoc.name, 
+        price: realPrice,      
         quantity: quantity,
         note: item.note || ''
       });
@@ -147,7 +144,6 @@ async function createOrder(req, res, next) {
         return res.status(404).json({ message: 'Mitra tidak ditemukan atau tidak aktif.' });
       }
       
-      // Gunakan timezone provider jika ada (feature future-proof), fallback ke default
       const targetTimeZone = provider.timeZone || DEFAULT_TIMEZONE;
       const targetOffset = provider.timeZoneOffset || DEFAULT_OFFSET;
 
@@ -158,7 +154,9 @@ async function createOrder(req, res, next) {
 
       // Validasi 0: Pastikan pesanan tidak Backdated (Masa Lalu)
       const now = new Date();
-      if (scheduled.fullDate < now) {
+      // Beri toleransi 1 jam untuk proses booking
+      const oneHourBefore = new Date(now.getTime() - 60 * 60 * 1000);
+      if (scheduled.fullDate < oneHourBefore) {
          return res.status(400).json({ message: 'Tanggal kunjungan tidak boleh di masa lalu.' });
       }
 
@@ -177,14 +175,12 @@ async function createOrder(req, res, next) {
       }
 
       // Validasi 2: Cek apakah tanggal sudah ada pesanan aktif (Double Booking Prevention)
-      // Kita cek range waktu dalam satu hari tersebut (00:00 - 23:59 Local Time)
-      // Menggunakan offset manual untuk konstruksi tanggal lokal yang akurat
       const dateStart = new Date(`${scheduled.dateOnly}T00:00:00.000${targetOffset}`);
       const dateEnd = new Date(`${scheduled.dateOnly}T23:59:59.999${targetOffset}`);
 
       const existingOrder = await Order.findOne({
         providerId: providerId,
-        status: { $in: ['paid', 'accepted', 'on_the_way', 'working', 'waiting_approval'] }, // Status yang dianggap "Booking Aktif"
+        status: { $in: ['paid', 'accepted', 'on_the_way', 'working', 'waiting_approval'] }, 
         scheduledAt: {
           $gte: dateStart,
           $lte: dateEnd
@@ -201,8 +197,8 @@ async function createOrder(req, res, next) {
     const order = new Order({ 
       userId, 
       providerId: orderType === 'direct' ? providerId : null,
-      items: validatedItems,          // [SECURE] Gunakan items yang sudah divalidasi
-      totalAmount: calculatedTotalAmount, // [SECURE] Gunakan total yang dihitung di server
+      items: validatedItems,          
+      totalAmount: calculatedTotalAmount, 
       orderType, 
       scheduledAt,
       shippingAddress,
@@ -262,10 +258,15 @@ async function listIncomingOrders(req, res, next) {
       return res.status(403).json({ message: 'Anda belum terdaftar sebagai Mitra.' });
     }
 
+    // Ambil semua ID Service yang dimiliki Provider dan AKTIF
     const myServiceIds = provider.services
       .filter(s => s.isActive)
-      .map(s => s.serviceId);
+      .map(s => s.serviceId.toString());
 
+    // Logic: Order masuk adalah order basic yang BELUM diambil (providerId: null)
+    // DAN item di dalam order tersebut HARUS sesuai dengan layanan yang dimiliki provider.
+    // Jika order memiliki multiple item, kita cek apakah provider punya SALAH SATU layanan tersebut (bisa disesuaikan jadi 'ALL' jika perlu).
+    
     const orders = await Order.find({
       $or: [
         { 
@@ -276,7 +277,7 @@ async function listIncomingOrders(req, res, next) {
         },
         { 
           providerId: provider._id,
-          status: 'paid'
+          status: 'paid' // Direct order yang sudah dibayar masuk sini
         }
       ]
     })
@@ -307,6 +308,7 @@ async function acceptOrder(req, res, next) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan.' });
     }
 
+    // Validasi status order sebelum diterima
     const validStatuses = ['searching', 'paid'];
     if (!validStatuses.includes(order.status)) {
       return res.status(400).json({ 
@@ -337,7 +339,7 @@ async function acceptOrder(req, res, next) {
     order.providerId = provider._id;
     await order.save();
 
-    res.json({ message: 'Pesanan berhasil diterima!  Segera hubungi pelanggan.', data: order });
+    res.json({ message: 'Pesanan berhasil diterima! Segera hubungi pelanggan.', data: order });
   } catch (error) {
     next(error);
   }
@@ -364,7 +366,9 @@ async function updateOrderStatus(req, res, next) {
       return res.status(403).json({ message: 'Anda tidak memiliki akses ke pesanan ini' });
     }
 
-    if (status === 'completed' && isProvider) {
+    // [FIXED] PROVIDER FLOW: Completed -> Waiting Approval
+    // Provider menekan tombol "Pekerjaan Selesai", mengirim status 'waiting_approval'
+    if (status === 'waiting_approval' && isProvider) {
       if (order.status !== 'working') {
         return res.status(400).json({ 
           message: 'Hanya pesanan yang sedang dikerjakan yang bisa diselesaikan.' 
@@ -378,13 +382,8 @@ async function updateOrderStatus(req, res, next) {
       });
     }
 
+    // CUSTOMER FLOW: Confirm Completion
     if (status === 'completed' && isCustomer) {
-      if (order.userId.toString() !== userId) {
-        return res.status(403).json({ 
-          message: 'Anda tidak berhak mengkonfirmasi pesanan ini.' 
-        });
-      }
-      
       if (order.status !== 'waiting_approval') {
         return res.status(400).json({ 
           message: 'Belum ada permintaan penyelesaian dari mitra.' 
@@ -392,9 +391,10 @@ async function updateOrderStatus(req, res, next) {
       }
       order.status = 'completed';
       await order.save();
-      return res.json({ message: 'Pesanan selesai!  Terima kasih.', data: order });
+      return res.json({ message: 'Pesanan selesai! Terima kasih.', data: order });
     }
 
+    // PROVIDER FLOW: Start Journey & Start Working
     if (['on_the_way', 'working'].includes(status)) {
       if (! isProvider) {
         return res.status(403).json({ 
@@ -418,6 +418,7 @@ async function updateOrderStatus(req, res, next) {
       return res.json({ message: `Status diubah menjadi ${status}`, data: order });
     }
 
+    // CANCEL FLOW
     if (status === 'cancelled') {
       const nonCancellableStatuses = ['completed', 'working', 'waiting_approval'];
       
