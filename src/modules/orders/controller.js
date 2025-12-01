@@ -2,6 +2,8 @@
 const Order = require('./model');
 const Provider = require('../providers/model');
 const Service = require('../services/model');
+const Settings = require('../settings/model');
+const Voucher = require('../vouchers/model');
 
 // [CONFIG] Default Timezone Configuration
 const DEFAULT_TIMEZONE = 'Asia/Jakarta';
@@ -63,6 +65,7 @@ async function listOrders(req, res, next) {
     const orders = await Order.find(filter)
       .populate('items.serviceId', 'name category iconUrl')
       .populate('userId', 'fullName phoneNumber')
+      .populate('voucherId', 'code discountType discountValue')
       .populate({
         path: 'providerId',
         select: 'userId rating',
@@ -97,11 +100,12 @@ async function createOrder(req, res, next) {
       orderNote,
       propertyDetails,
       scheduledTimeSlot,
-      attachments
+      attachments,
+      voucherCode // [BARU] Menerima kode voucher dari frontend
     } = req.body;
 
     // --- SECURITY CHECK: CALCULATE PRICE FROM DB ---
-    let calculatedTotalAmount = 0;
+    let servicesSubtotal = 0;
     const validatedItems = [];
 
     if (items.length === 0) {
@@ -121,7 +125,7 @@ async function createOrder(req, res, next) {
       const realPrice = serviceDoc.price || serviceDoc.basePrice; // Fallback ke basePrice jika price undefined
       const subTotal = realPrice * quantity;
 
-      calculatedTotalAmount += subTotal;
+      servicesSubtotal += subTotal;
 
       validatedItems.push({
         serviceId: serviceDoc._id,
@@ -131,6 +135,66 @@ async function createOrder(req, res, next) {
         note: item.note || ''
       });
     }
+    
+    // --- [UPDATED] FETCH ADMIN FEE DARI DB ---
+    const settings = await Settings.findOne({ key: 'global_config' });
+    const adminFee = settings ? settings.adminFee : 0;
+
+    // --- [UPDATED] VOUCHER LOGIC ---
+    let discountAmount = 0;
+    let voucherId = null;
+
+    if (voucherCode) {
+      const voucher = await Voucher.findOne({ 
+        code: voucherCode.toUpperCase(), 
+        isActive: true 
+      });
+
+      if (!voucher) {
+        return res.status(404).json({ message: 'Voucher tidak ditemukan atau tidak aktif' });
+      }
+
+      // Validasi Voucher
+      const now = new Date();
+      if (new Date(voucher.expiryDate) < now) {
+        return res.status(400).json({ message: 'Voucher sudah kadaluarsa' });
+      }
+
+      if (voucher.quota <= 0) {
+        return res.status(400).json({ message: 'Kuota voucher sudah habis' });
+      }
+
+      if (servicesSubtotal < voucher.minPurchase) {
+        return res.status(400).json({ 
+          message: `Minimal pembelian untuk voucher ini adalah Rp ${voucher.minPurchase.toLocaleString()}` 
+        });
+      }
+
+      // Hitung Diskon
+      if (voucher.discountType === 'percentage') {
+        discountAmount = (servicesSubtotal * voucher.discountValue) / 100;
+        if (voucher.maxDiscount > 0 && discountAmount > voucher.maxDiscount) {
+          discountAmount = voucher.maxDiscount;
+        }
+      } else {
+        discountAmount = voucher.discountValue;
+      }
+
+      // Pastikan diskon tidak minus atau melebihi subtotal
+      if (discountAmount > servicesSubtotal) {
+        discountAmount = servicesSubtotal;
+      }
+
+      voucherId = voucher._id;
+
+      // Kurangi kuota voucher (Opsional: bisa dipindah saat pembayaran sukses)
+      await Voucher.findByIdAndUpdate(voucher._id, { $inc: { quota: -1 } });
+    }
+
+    // --- [UPDATED] FINAL TOTAL CALCULATION ---
+    // Total = Jasa + Admin - Diskon
+    const finalTotalAmount = servicesSubtotal + adminFee - discountAmount;
+
     // ------------------------------------------------
 
     // --- VALIDASI JADWAL UNTUK DIRECT ORDER ---
@@ -198,7 +262,13 @@ async function createOrder(req, res, next) {
       userId, 
       providerId: orderType === 'direct' ? providerId : null,
       items: validatedItems,          
-      totalAmount: calculatedTotalAmount, 
+      
+      // [UPDATED] Financial Fields
+      totalAmount: Math.floor(finalTotalAmount), // Bulatkan agar rapi
+      adminFee: adminFee,
+      discountAmount: Math.floor(discountAmount),
+      voucherId: voucherId,
+
       orderType, 
       scheduledAt,
       shippingAddress,
@@ -231,6 +301,7 @@ async function getOrderById(req, res, next) {
     
     const order = await Order.findById(orderId)
       .populate('items.serviceId', 'name iconUrl')
+      .populate('voucherId', 'code description') // [UPDATED] Populate info voucher
       .populate({
         path: 'providerId',
         select: 'userId rating isOnline',

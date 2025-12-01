@@ -18,6 +18,8 @@ const orderRoutes = require('./modules/orders/routes');
 const providerRoutes = require('./modules/providers/routes');
 const paymentRoutes = require('./modules/payments/routes');
 const chatRoutes = require('./modules/chat/routes');
+const settingsRoutes = require('./modules/settings/routes');
+const voucherRoutes = require('./modules/vouchers/routes');
 const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
@@ -73,6 +75,8 @@ app.use('/api/payments', requireDbConnection, paymentRoutes);
 app.use('/api/chat', requireDbConnection, chatRoutes);
 app.use('/api/reviews', requireDbConnection, reviewRoutes);
 app.use('/api/services', requireDbConnection, serviceRoutes);
+app.use('/api/settings', requireDbConnection, settingsRoutes);
+app.use('/api/vouchers', requireDbConnection, voucherRoutes);
 
 app.use(errorHandler);
 

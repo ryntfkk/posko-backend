@@ -63,10 +63,27 @@ const orderSchema = new mongoose.Schema(
       default: 'pending',
       index: true
     },
+    
+    // ============ FINANCIAL DETAILS (UPDATED) ============
     totalAmount: {
       type: Number,
       required: true,
     },
+    adminFee: {
+      type: Number,
+      default: 0
+    },
+    voucherId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Voucher',
+      default: null
+    },
+    discountAmount: {
+      type: Number,
+      default: 0
+    },
+    // =====================================================
+
     scheduledAt: {
       type: Date,
       required: [true, 'Tanggal kunjungan (scheduledAt) wajib diisi'],
