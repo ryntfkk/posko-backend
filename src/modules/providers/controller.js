@@ -6,17 +6,20 @@ const Order = require('../orders/model');
 const { Types } = require('mongoose');
 
 // Helper: Ambil tanggal-tanggal yang sudah dibooking (Order Aktif)
+// [FIX] Gunakan 'scheduledAt' bukan 'orderDate' - sesuai Order schema
 async function getBookedDates(providerId) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
   const orders = await Order.find({
     providerId,
-    status: { $in: ['pending', 'accepted', 'in_progress'] },
-    orderDate: { $gte: today }
-  }).select('orderDate');
+    status: { $in: ['paid', 'accepted', 'on_the_way', 'working'] },
+    scheduledAt: { $gte: today }
+  }).select('scheduledAt');
 
-  return orders.map(o => o.orderDate.toISOString().split('T')[0]);
+  return orders
+    .filter(o => o.scheduledAt)
+    .map(o => o.scheduledAt.toISOString().split('T')[0]);
 }
 
 // Helper: Hitung total pesanan selesai
@@ -30,14 +33,14 @@ async function getCompletedOrdersCount(providerId) {
 
 async function listProviders(req, res, next) {
   try {
-    const { 
-      lat, 
-      lng, 
-      category, 
-      search, 
-      sortBy = 'distance', 
-      limit = 10, 
-      page = 1 
+    const {
+      lat,
+      lng,
+      category,
+      search,
+      sortBy = 'distance',
+      limit = 10,
+      page = 1
     } = req.query;
 
     const pipeline = [];
@@ -46,27 +49,27 @@ async function listProviders(req, res, next) {
     if (lat && lng) {
       pipeline.push({
         $geoNear: {
-          near: { 
-            type: "Point", 
-            coordinates: [parseFloat(lng), parseFloat(lat)] 
+          near: {
+            type: "Point",
+            coordinates: [parseFloat(lng), parseFloat(lat)]
           },
-          distanceField: "distance", 
-          maxDistance: 20000, 
+          distanceField: "distance",
+          maxDistance: 20000,
           spherical: true,
-          query: { 
+          query: {
             roles: { $in: ['provider'] }
-          } 
+          }
         }
       });
     } else {
-      pipeline.push({ 
-        $match: { 
+      pipeline.push({
+        $match: {
           roles: { $in: ['provider'] }
-        } 
+        }
       });
     }
 
-    // 2.RELASI KE DATA PROVIDER
+    // 2. RELASI KE DATA PROVIDER
     pipeline.push({
       $lookup: {
         from: 'providers',
@@ -75,22 +78,20 @@ async function listProviders(req, res, next) {
         as: 'providerInfo'
       }
     });
-    
-    // Filter provider yang belum punya data di collection providers
-    pipeline.push({ 
-      $match: { 
-        'providerInfo': { $ne: [] } 
-      } 
+
+    pipeline.push({
+      $match: {
+        'providerInfo': { $ne: [] }
+      }
     });
-    
+
     pipeline.push({ $unwind: '$providerInfo' });
 
-    // 3. RELASI KE LAYANAN
-    // [FIX] Hapus spasi di path - gunakan "providerInfo.services.serviceId" bukan "providerInfo.services. serviceId"
+    // 3.RELASI KE LAYANAN
     pipeline.push({
       $lookup: {
         from: 'services',
-        localField: 'providerInfo.services.serviceId',  // ✅ TANPA SPASI
+        localField: 'providerInfo.services.serviceId',
         foreignField: '_id',
         as: 'serviceDetails'
       }
@@ -98,24 +99,21 @@ async function listProviders(req, res, next) {
 
     // 4.LOGIKA FILTER
     const matchConditions = [];
-    
-    // [FIX] Filter Kategori - validasi ketat dan case-insensitive
-    const isValidCategory = category && 
-                            typeof category === 'string' && 
-                            category.trim() !== '' && 
-                            category.toLowerCase() !== 'undefined' &&
-                            category.toLowerCase() !== 'null';
-    
+
+    const isValidCategory = category &&
+      typeof category === 'string' &&
+      category.trim() !== '' &&
+      category.toLowerCase() !== 'undefined' &&
+      category.toLowerCase() !== 'null';
+
     if (isValidCategory) {
-      // Normalize: decode, lowercase, trim, dan replace dash dengan space
       const normalizedCategory = decodeURIComponent(category)
         .toLowerCase()
         .trim()
         .replace(/-/g, ' ');
-      
+
       console.log(`[CATEGORY FILTER] Original: "${category}", Normalized: "${normalizedCategory}"`);
-      
-      // [FIX] Gunakan $eq dengan $toLower untuk exact case-insensitive matching
+
       pipeline.push({
         $addFields: {
           hasMatchingService: {
@@ -125,7 +123,7 @@ async function listProviders(req, res, next) {
                   $filter: {
                     input: '$serviceDetails',
                     as: 'svc',
-                    cond: { 
+                    cond: {
                       $eq: [
                         { $toLower: { $trim: { input: '$$svc.category' } } },
                         normalizedCategory
@@ -139,15 +137,14 @@ async function listProviders(req, res, next) {
           }
         }
       });
-      
+
       matchConditions.push({ hasMatchingService: true });
     }
 
-    // [FIX] Search Filter - validasi ketat
-    const isValidSearch = search && 
-                          typeof search === 'string' && 
-                          search.trim() !== '';
-    
+    const isValidSearch = search &&
+      typeof search === 'string' &&
+      search.trim() !== '';
+
     if (isValidSearch) {
       const searchRegex = new RegExp(search.trim(), 'i');
       matchConditions.push({
@@ -180,7 +177,6 @@ async function listProviders(req, res, next) {
     pipeline.push({ $limit: parseInt(limit) });
 
     // 7.PROJECT (Format Output)
-    // [FIX] Hapus spasi di semua path
     pipeline.push({
       $project: {
         _id: '$providerInfo._id',
@@ -196,33 +192,31 @@ async function listProviders(req, res, next) {
         },
         services: '$providerInfo.services',
         rating: '$providerInfo.rating',
-        isOnline: '$providerInfo.isOnline',  // ✅ TANPA SPASI
+        isOnline: '$providerInfo.isOnline',
         blockedDates: '$providerInfo.blockedDates',
         portfolioImages: '$providerInfo.portfolioImages',
         totalCompletedOrders: '$providerInfo.totalCompletedOrders',
+        schedule: '$providerInfo.schedule',
         createdAt: '$providerInfo.createdAt',
-        distance: '$distance' 
+        distance: '$distance'
       }
     });
 
     const providers = await User.aggregate(pipeline);
 
-    // Populate services dengan detail lengkap
-    // [FIX] Hapus spasi di path
     await Provider.populate(providers, {
-      path: 'services.serviceId',  // ✅ TANPA SPASI
+      path: 'services.serviceId',
       select: 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent',
       model: Service
     });
 
-    // [FIX] Log yang lebih informatif
-    const filterInfo = isValidCategory ?  `category: "${category}"` : 'no category filter';
+    const filterInfo = isValidCategory ? `category: "${category}"` : 'no category filter';
     console.log(`[PROVIDERS RESULT] Found ${providers.length} providers (${filterInfo})`);
 
-    res.json({ 
-      messageKey: 'providers.list',  // ✅ TANPA SPASI
-      message: 'Berhasil memuat data mitra', 
-      data: providers 
+    res.json({
+      messageKey: 'providers.list',
+      message: 'Berhasil memuat data mitra',
+      data: providers
     });
 
   } catch (error) {
@@ -245,7 +239,7 @@ async function getProviderById(req, res, next) {
         select: 'fullName profilePictureUrl address location bio phoneNumber'
       })
       .populate({
-        path: 'services.serviceId',  // ✅ TANPA SPASI
+        path: 'services.serviceId',
         select: 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent'
       });
 
@@ -260,9 +254,9 @@ async function getProviderById(req, res, next) {
     providerData.bookedDates = bookedDates;
     providerData.totalCompletedOrders = totalCompletedOrders;
 
-    res.json({ 
-      messageKey: 'providers.detail',  // ✅ TANPA SPASI
-      message: 'Detail mitra ditemukan', 
+    res.json({
+      messageKey: 'providers.detail',
+      message: 'Detail mitra ditemukan',
       data: providerData
     });
   } catch (error) {
@@ -274,20 +268,21 @@ async function getProviderMe(req, res, next) {
   try {
     const userId = req.user.userId;
     const provider = await Provider.findOne({ userId })
-      .populate('services.serviceId', 'name category iconUrl unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent');
+      .populate('services.serviceId', 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent');
 
-    if (! provider) {
+    if (!provider) {
       return res.status(404).json({ message: 'Profil Mitra belum dibuat' });
     }
 
     const bookedDates = await getBookedDates(provider._id);
     const totalCompletedOrders = await getCompletedOrdersCount(provider._id);
-    
+
     const providerData = provider.toObject();
     providerData.bookedDates = bookedDates;
     providerData.totalCompletedOrders = totalCompletedOrders;
 
     res.json({
+      messageKey: 'providers.me',
       message: 'Profil mitra ditemukan',
       data: providerData
     });
@@ -299,7 +294,7 @@ async function getProviderMe(req, res, next) {
 async function createProvider(req, res, next) {
   try {
     const { userId, services = [] } = req.body;
-    
+
     const exist = await Provider.findOne({ userId });
     if (exist) {
       return res.status(400).json({ message: 'User ini sudah terdaftar sebagai provider' });
@@ -307,16 +302,16 @@ async function createProvider(req, res, next) {
 
     const provider = new Provider({ userId, services });
     await provider.save();
-    
-    await User.findByIdAndUpdate(userId, { 
-        $addToSet: { roles: 'provider' },
-        activeRole: 'provider' 
+
+    await User.findByIdAndUpdate(userId, {
+      $addToSet: { roles: 'provider' },
+      activeRole: 'provider'
     });
 
-    res.status(201).json({ 
-        messageKey: 'providers.created', 
-        message: 'Provider berhasil didaftarkan', 
-        data: provider 
+    res.status(201).json({
+      messageKey: 'providers.created',
+      message: 'Provider berhasil didaftarkan',
+      data: provider
     });
   } catch (error) {
     next(error);
@@ -337,7 +332,8 @@ async function updateAvailability(req, res, next) {
     provider.blockedDates = blockedDates;
     await provider.save();
 
-    res.json({ 
+    res.json({
+      messageKey: 'providers.availability.updated',
       message: 'Ketersediaan berhasil diperbarui',
       data: blockedDates
     });
@@ -352,8 +348,8 @@ async function updatePortfolio(req, res, next) {
     const userId = req.user.userId;
     const { portfolioImages } = req.body;
 
-    if (!Array.isArray(portfolioImages) || portfolioImages.length === 0) {
-      return res.status(400).json({ message: 'Portfolio harus memiliki minimal 1 gambar' });
+    if (!Array.isArray(portfolioImages)) {
+      return res.status(400).json({ message: 'Format portfolio tidak valid' });
     }
 
     const provider = await Provider.findOne({ userId });
@@ -364,7 +360,8 @@ async function updatePortfolio(req, res, next) {
     provider.portfolioImages = portfolioImages;
     await provider.save();
 
-    res.json({ 
+    res.json({
+      messageKey: 'providers.portfolio.updated',
       message: 'Portfolio berhasil diperbarui',
       data: provider
     });
@@ -373,11 +370,97 @@ async function updatePortfolio(req, res, next) {
   }
 }
 
-module.exports = { 
-    listProviders, 
-    getProviderById, 
-    getProviderMe, 
-    createProvider, 
-    updateAvailability, 
-    updatePortfolio 
+// [NEW] Update Provider Services
+async function updateProviderServices(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const { services } = req.body;
+
+    if (! Array.isArray(services)) {
+      return res.status(400).json({ message: 'Format layanan tidak valid' });
+    }
+
+    const provider = await Provider.findOne({ userId });
+    if (! provider) {
+      return res.status(404).json({ message: 'Profil mitra tidak ditemukan' });
+    }
+
+    provider.services = services;
+    await provider.save();
+
+    const updatedProvider = await Provider.findOne({ userId })
+      .populate('services.serviceId', 'name category iconUrl basePrice unit unitLabel');
+
+    res.json({
+      messageKey: 'providers.services.updated',
+      message: 'Layanan berhasil diperbarui',
+      data: updatedProvider
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// [NEW] Update Provider Schedule (Jam Operasional)
+async function updateSchedule(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const { schedule } = req.body;
+
+    if (!Array.isArray(schedule)) {
+      return res.status(400).json({ message: 'Format jadwal tidak valid' });
+    }
+
+    const provider = await Provider.findOne({ userId });
+    if (! provider) {
+      return res.status(404).json({ message: 'Profil mitra tidak ditemukan' });
+    }
+
+    provider.schedule = schedule;
+    await provider.save();
+
+    res.json({
+      messageKey: 'providers.schedule.updated',
+      message: 'Jadwal operasional berhasil diperbarui',
+      data: provider.schedule
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// [NEW] Toggle Online Status
+async function toggleOnlineStatus(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const { isOnline } = req.body;
+
+    const provider = await Provider.findOne({ userId });
+    if (!provider) {
+      return res.status(404).json({ message: 'Profil mitra tidak ditemukan' });
+    }
+
+    provider.isOnline = isOnline;
+    await provider.save();
+
+    res.json({
+      messageKey: 'providers.status.updated',
+      message: `Status berhasil diubah menjadi ${isOnline ? 'Online' : 'Offline'}`,
+      data: { isOnline: provider.isOnline }
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+module.exports = {
+  listProviders,
+  getProviderById,
+  getProviderMe,
+  createProvider,
+  updateAvailability,
+  updatePortfolio,
+  updateProviderServices,
+  updateSchedule,
+  toggleOnlineStatus
 };
