@@ -1,8 +1,10 @@
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 const Payment = require('./model');
 const Order = require('../orders/model');
 const snap = require('../../utils/midtrans');
 const { checkMidtransConfig } = require('../../utils/midtransConfig');
+const env = require('../../config/env');
 
 async function listPayments(req, res, next) {
   try {
@@ -113,6 +115,26 @@ async function handleNotification(req, res, next) {
   try {
     const notification = req.body;
     
+    // [SECURITY FIX] Verifikasi Signature Key Midtrans
+    // Signature validasi: SHA512(order_id + status_code + gross_amount + ServerKey)
+    const { order_id, status_code, gross_amount, signature_key } = notification;
+    const serverKey = env.midtransKey;
+
+    if (!signature_key || !order_id || !status_code || !gross_amount) {
+        // Jangan memberikan detail error terlalu spesifik ke publik, cukup log di server
+        console.error('❌ Invalid notification payload:', notification);
+        return res.status(400).json({ message: 'Invalid notification payload' });
+    }
+
+    const signatureInput = `${order_id}${status_code}${gross_amount}${serverKey}`;
+    const expectedSignature = crypto.createHash('sha512').update(signatureInput).digest('hex');
+
+    if (signature_key !== expectedSignature) {
+        console.error(`🚨 Security Alert: Invalid Signature detected! Order: ${order_id}`);
+        return res.status(403).json({ message: 'Invalid signature key' });
+    }
+
+    // Lanjut proses jika signature valid
     const transactionStatus = notification.transaction_status;
     const fraudStatus = notification.fraud_status;
     const orderIdFull = notification.order_id; 
@@ -149,18 +171,19 @@ async function handleNotification(req, res, next) {
         
         const order = await Order.findById(realOrderId);
         if (order) {
-            // [PERBAIKAN UTAMA DISINI]
             // Jika Direct Order -> Status 'paid' (Menunggu konfirmasi Provider)
             // Jika Basic Order  -> Status 'searching' (Mencari Provider via broadcast)
             
             // Cek dulu agar tidak menimpa status jika sudah diproses lanjut (misal accepted/working)
-            if (['pending', 'cancelled'].includes(order.status)) {
+            if (['pending', 'cancelled', 'failed'].includes(order.status)) {
                 const nextStatus = order.orderType === 'direct' ? 'paid' : 'searching';
                 await Order.findByIdAndUpdate(realOrderId, { status: nextStatus });
             }
         }
     } else if (paymentStatus === 'failed') {
         await Payment.findOneAndUpdate({ orderId: realOrderId }, { status: 'failed' });
+        // Jika gagal bayar, kembalikan ke pending atau batalkan tergantung aturan bisnis
+        // Di sini kita set cancelled agar user buat order ulang (karena order ID Midtrans unik)
         await Order.findByIdAndUpdate(realOrderId, { status: 'cancelled' });
     }
 

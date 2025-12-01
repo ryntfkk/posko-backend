@@ -2,30 +2,42 @@
 const Order = require('./model');
 const Provider = require('../providers/model');
 
-// Helper: Konversi Date ke WIB dan ekstrak komponen waktu
-function getWIBComponents(dateInput) {
+// [CONFIG] Default Timezone Configuration
+// Idealnya offset dan timezone ini diambil dari profil Provider/User
+// Saat ini kita sentralisasi di sini agar mudah diubah (Support WIB/UTC+7)
+const DEFAULT_TIMEZONE = 'Asia/Jakarta';
+const DEFAULT_OFFSET = '+07:00'; 
+
+// Helper: Konversi Date ke Date Components berdasarkan Timezone
+function getLocalDateComponents(dateInput, timeZone = DEFAULT_TIMEZONE) {
   if (!dateInput) return null;
   
   const date = new Date(dateInput);
   if (isNaN(date.getTime())) return null;
   
-  const formatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Jakarta',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  });
-  
-  const parts = formatter.formatToParts(date);
-  const getPart = (type) => parts.find(p => p.type === type)?.value || '';
-  
-  return {
-    dateOnly: `${getPart('year')}-${getPart('month')}-${getPart('day')}`,
-    timeStr: `${getPart('hour')}:${getPart('minute')}`,
-  };
+  try {
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+    
+    const parts = formatter.formatToParts(date);
+    const getPart = (type) => parts.find(p => p.type === type)?.value || '';
+    
+    return {
+      dateOnly: `${getPart('year')}-${getPart('month')}-${getPart('day')}`,
+      timeStr: `${getPart('hour')}:${getPart('minute')}`,
+      fullDate: date // Object Date asli (UTC)
+    };
+  } catch (error) {
+    console.error(`Invalid Timezone: ${timeZone}`, error);
+    return null;
+  }
 }
 
 // 1.LIST ALL ORDERS
@@ -67,7 +79,7 @@ async function listOrders(req, res, next) {
   }
 }
 
-// 2.CREATE ORDER (UPDATED: Tambah Validasi Double Booking)
+// 2.CREATE ORDER (UPDATED: Validasi Zona Waktu & Double Booking)
 async function createOrder(req, res, next) {
   try {
     const userId = req.user?.userId;
@@ -101,15 +113,25 @@ async function createOrder(req, res, next) {
         return res.status(404).json({ message: 'Mitra tidak ditemukan atau tidak aktif.' });
       }
       
-      const scheduled = getWIBComponents(scheduledAt);
+      // Gunakan timezone provider jika ada (feature future-proof), fallback ke default
+      const targetTimeZone = provider.timeZone || DEFAULT_TIMEZONE;
+      const targetOffset = provider.timeZoneOffset || DEFAULT_OFFSET;
+
+      const scheduled = getLocalDateComponents(scheduledAt, targetTimeZone);
       if (! scheduled) {
         return res.status(400).json({ message: 'Format tanggal kunjungan tidak valid.' });
+      }
+
+      // Validasi 0: Pastikan pesanan tidak Backdated (Masa Lalu)
+      const now = new Date();
+      if (scheduled.fullDate < now) {
+         return res.status(400).json({ message: 'Tanggal kunjungan tidak boleh di masa lalu.' });
       }
 
       // Validasi 1: Cek apakah tanggal diblokir manual oleh Provider (Kalender Libur)
       if (provider.blockedDates && provider.blockedDates.length > 0) {
         const isBlocked = provider.blockedDates.some(blockedDate => {
-          const blocked = getWIBComponents(blockedDate);
+          const blocked = getLocalDateComponents(blockedDate, targetTimeZone);
           return blocked && blocked.dateOnly === scheduled.dateOnly;
         });
         
@@ -121,9 +143,10 @@ async function createOrder(req, res, next) {
       }
 
       // Validasi 2: Cek apakah tanggal sudah ada pesanan aktif (Double Booking Prevention)
-      // Kita cek range waktu dalam satu hari tersebut (00:00 - 23:59 WIB)
-      const dateStart = new Date(scheduled.dateOnly + 'T00:00:00.000+07:00');
-      const dateEnd = new Date(scheduled.dateOnly + 'T23:59:59.999+07:00');
+      // Kita cek range waktu dalam satu hari tersebut (00:00 - 23:59 Local Time)
+      // Menggunakan offset manual untuk konstruksi tanggal lokal yang akurat
+      const dateStart = new Date(`${scheduled.dateOnly}T00:00:00.000${targetOffset}`);
+      const dateEnd = new Date(`${scheduled.dateOnly}T23:59:59.999${targetOffset}`);
 
       const existingOrder = await Order.findOne({
         providerId: providerId,
