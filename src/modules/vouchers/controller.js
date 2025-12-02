@@ -29,31 +29,38 @@ async function listAvailableVouchers(req, res, next) {
     let claimedVoucherIds = [];
     if (userId) {
       const claimedVouchers = await UserVoucher.find({ userId }).select('voucherId');
-      claimedVoucherIds = claimedVouchers.map(uv => uv.voucherId);
+      // Convert ke string agar mudah dicocokkan nanti
+      claimedVoucherIds = claimedVouchers.map(uv => uv.voucherId.toString());
     }
 
     // Cari voucher master yang:
     // 1. Aktif
     // 2. Kuota > 0
     // 3. Belum expired
-    // 4. [Jika Login] ID-nya TIDAK ada di daftar claimedVoucherIds
+    // NOTE: Kita TIDAK lagi mengecualikan claimedVoucherIds dari query database
+    // agar voucher tetap muncul di list meski sudah diklaim.
     const query = {
       isActive: true,
       quota: { $gt: 0 },
       expiryDate: { $gt: now }
     };
 
-    if (claimedVoucherIds.length > 0) {
-      query._id = { $nin: claimedVoucherIds };
-    }
-
+    // Gunakan .lean() agar hasil query berupa Plain JS Object (bukan Mongoose Document)
+    // sehingga kita bisa memodifikasinya (menambah property isClaimed)
     const vouchers = await Voucher.find(query)
     .populate('applicableServices', 'name')
-    .sort({ createdAt: -1 });
+    .sort({ createdAt: -1 })
+    .lean();
+
+    // Map data untuk menambahkan flag isClaimed
+    const formattedVouchers = vouchers.map(voucher => ({
+        ...voucher,
+        isClaimed: claimedVoucherIds.includes(voucher._id.toString())
+    }));
 
     res.json({ 
       message: 'Daftar voucher tersedia berhasil diambil', 
-      data: vouchers 
+      data: formattedVouchers 
     });
   } catch (error) {
     next(error);
