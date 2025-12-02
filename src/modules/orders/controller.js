@@ -60,7 +60,7 @@ async function listOrders(req, res, next) {
       }
     } 
     
-    if (roles.includes('admin') && ! view) {
+    if (roles.includes('admin') && !  view) {
       filter = {}; 
     }
 
@@ -77,7 +77,7 @@ async function listOrders(req, res, next) {
       .lean();
 
     const messageKey = 'orders.list';
-    res.json({ messageKey, message: req.t ?  req.t(messageKey) : 'List Orders', data: orders });
+    res.json({ messageKey, message: req.t ?   req.t(messageKey) : 'List Orders', data: orders });
   } catch (error) {
     next(error);
   }
@@ -85,7 +85,7 @@ async function listOrders(req, res, next) {
 
 // 2.CREATE ORDER
 async function createOrder(req, res, next) {
-  const session = await mongoose.startSession(); // [FIX POINT 4] Start Session
+  const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
@@ -115,6 +115,36 @@ async function createOrder(req, res, next) {
       return res.status(400).json({ message: 'Items tidak boleh kosong' });
     }
 
+    // --- [FIX] FETCH PROVIDER DATA UNTUK DIRECT ORDER ---
+    let providerData = null;
+    let providerSnapshot = {};
+
+    if (orderType === 'direct') {
+      if (! providerId) {
+        await session.abortTransaction();
+        return res.status(400).json({ message: 'Provider ID wajib untuk Direct Order' });
+      }
+
+      providerData = await Provider.findById(providerId)
+        .populate('userId', 'fullName profilePictureUrl phoneNumber')
+        .session(session)
+        .lean();
+
+      if (!providerData) {
+        await session.abortTransaction();
+        return res.status(404).json({ message: 'Mitra tidak ditemukan atau tidak aktif.' });
+      }
+
+      if (providerData.userId) {
+        providerSnapshot = {
+          fullName: providerData.userId.fullName,
+          profilePictureUrl: providerData.userId.profilePictureUrl,
+          phoneNumber: providerData.userId.phoneNumber,
+          rating: providerData.rating || 0
+        };
+      }
+    }
+
     // --- [OPTIMIZED] FETCH SERVICES SEKALI JALAN ---
     const serviceIds = items.map(item => item.serviceId).filter(Boolean);
     const foundServices = await Service.find({ _id: { $in: serviceIds } }).session(session);
@@ -134,22 +164,40 @@ async function createOrder(req, res, next) {
       }
 
       const quantity = parseInt(item.quantity) || 1;
-      const realPrice = serviceDoc.price || serviceDoc.basePrice; 
-      const subTotal = realPrice * quantity;
+      let realPrice;
 
+      // --- [FIX UTAMA] PRICING LOGIC UNTUK DIRECT ORDER ---
+      if (orderType === 'direct' && providerData) {
+        const providerService = providerData.services.find(
+          ps => ps.serviceId && ps.serviceId.toString() === item.serviceId.toString() && ps.isActive
+        );
+
+        if (! providerService) {
+          await session.abortTransaction();
+          return res.status(400).json({ 
+            message: `Mitra ini tidak menyediakan layanan "${serviceDoc.name}".` 
+          });
+        }
+
+        realPrice = providerService.price;
+      } else {
+        realPrice = serviceDoc.price || serviceDoc.basePrice;
+      }
+
+      const subTotal = realPrice * quantity;
       servicesSubtotal += subTotal;
 
       validatedItems.push({
         serviceId: serviceDoc._id,
         name: serviceDoc.name, 
-        price: realPrice,      
+        price: realPrice,
         quantity: quantity,
         note: item.note || ''
       });
     }
     
     const settings = await Settings.findOne({ key: 'global_config' }).session(session);
-    const adminFee = settings ? settings.adminFee : 2500;
+    const adminFee = settings ?  settings.adminFee : 2500;
 
     // --- [FIXED] VOUCHER LOGIC WITH ATOMIC TRANSACTION ---
     let discountAmount = 0;
@@ -165,14 +213,14 @@ async function createOrder(req, res, next) {
         match: { code: voucherCode.toUpperCase() }
       }).session(session);
 
-      if (!userVoucher || !userVoucher.voucherId) {
+      if (! userVoucher || !userVoucher.voucherId) {
         await session.abortTransaction();
         return res.status(404).json({ message: 'Voucher tidak valid atau belum diklaim.' });
       }
 
       const voucher = userVoucher.voucherId;
       const now = new Date();
-      if (!voucher.isActive || new Date(voucher.expiryDate) < now) {
+      if (! voucher.isActive || new Date(voucher.expiryDate) < now) {
         await session.abortTransaction();
         return res.status(400).json({ message: 'Voucher sudah kadaluarsa' });
       }
@@ -221,7 +269,6 @@ async function createOrder(req, res, next) {
 
       voucherId = voucher._id;
 
-      // [CRITICAL FIX POINT 4] Lock Voucher using Session
       lockedUserVoucher = await UserVoucher.findOneAndUpdate(
         { 
           _id: userVoucher._id, 
@@ -231,10 +278,10 @@ async function createOrder(req, res, next) {
           status: 'used',
           usageDate: new Date()
         },
-        { new: true, session: session } // Inject Session Here
+        { new: true, session: session }
       );
 
-      if (!lockedUserVoucher) {
+      if (! lockedUserVoucher) {
         await session.abortTransaction();
         return res.status(400).json({ message: 'Voucher gagal digunakan atau sudah terpakai.' });
       }
@@ -242,42 +289,13 @@ async function createOrder(req, res, next) {
 
     const finalTotalAmount = servicesSubtotal + adminFee - discountAmount;
 
-    // --- [FIX POINT 6] Prepare Snapshot Data ---
-    let providerSnapshot = {};
-
     // --- VALIDASI JADWAL UNTUK DIRECT ORDER ---
-    if (orderType === 'direct') {
-      if (!providerId) {
-        await session.abortTransaction();
-        return res.status(400).json({ message: 'Provider ID wajib untuk Direct Order' });
-      }
-
-      // [FIX POINT 6] Populate User info untuk Snapshot
-      const provider = await Provider.findById(providerId)
-        .populate('userId', 'fullName profilePictureUrl phoneNumber')
-        .session(session)
-        .lean();
-
-      if (! provider) {
-        await session.abortTransaction();
-        return res.status(404).json({ message: 'Mitra tidak ditemukan atau tidak aktif.' });
-      }
-
-      // Isi Snapshot Data
-      if (provider.userId) {
-        providerSnapshot = {
-          fullName: provider.userId.fullName,
-          profilePictureUrl: provider.userId.profilePictureUrl,
-          phoneNumber: provider.userId.phoneNumber,
-          rating: provider.rating || 0
-        };
-      }
-      
-      const targetTimeZone = provider.timeZone || DEFAULT_TIMEZONE;
-      const targetOffset = provider.timeZoneOffset || DEFAULT_OFFSET;
+    if (orderType === 'direct' && providerData) {
+      const targetTimeZone = providerData.timeZone || DEFAULT_TIMEZONE;
+      const targetOffset = providerData.timeZoneOffset || DEFAULT_OFFSET;
 
       const scheduled = getLocalDateComponents(scheduledAt, targetTimeZone);
-      if (! scheduled) {
+      if (!  scheduled) {
         await session.abortTransaction();
         return res.status(400).json({ message: 'Format tanggal kunjungan tidak valid.' });
       }
@@ -289,8 +307,8 @@ async function createOrder(req, res, next) {
          return res.status(400).json({ message: 'Tanggal kunjungan tidak boleh di masa lalu.' });
       }
 
-      if (provider.blockedDates && provider.blockedDates.length > 0) {
-        const isBlocked = provider.blockedDates.some(blockedDate => {
+      if (providerData.blockedDates && providerData.blockedDates.length > 0) {
+        const isBlocked = providerData.blockedDates.some(blockedDate => {
           const blocked = getLocalDateComponents(blockedDate, targetTimeZone);
           return blocked && blocked.dateOnly === scheduled.dateOnly;
         });
@@ -327,7 +345,7 @@ async function createOrder(req, res, next) {
     const order = new Order({ 
       userId, 
       providerId: orderType === 'direct' ? providerId : null,
-      providerSnapshot, // [FIX POINT 6] Save Snapshot
+      providerSnapshot,
       items: validatedItems,          
       
       totalAmount: Math.floor(finalTotalAmount),
@@ -346,10 +364,8 @@ async function createOrder(req, res, next) {
       attachments: attachments || []
     });
     
-    // Save Order with Session
     await order.save({ session });
     
-    // Update Order ID di Voucher dengan Session
     if (lockedUserVoucher) {
       await UserVoucher.findByIdAndUpdate(
         lockedUserVoucher._id, 
@@ -358,7 +374,6 @@ async function createOrder(req, res, next) {
       );
     }
 
-    // Commit Transaction (Semua perubahan DB disimpan permanent)
     await session.commitTransaction();
 
     res.status(201).json({ 
@@ -370,7 +385,6 @@ async function createOrder(req, res, next) {
     });
 
   } catch (error) {
-    // [FIX POINT 4] Rollback Transaction jika terjadi error apa saja
     await session.abortTransaction();
     next(error);
   } finally {
@@ -385,7 +399,7 @@ async function getOrderById(req, res, next) {
     
     const order = await Order.findById(orderId)
       .populate('items.serviceId', 'name iconUrl')
-      .populate('voucherId', 'code description') // [UPDATED] Populate info voucher
+      .populate('voucherId', 'code description')
       .populate({
         path: 'providerId',
         select: 'userId rating isOnline',
@@ -413,14 +427,9 @@ async function listIncomingOrders(req, res, next) {
       return res.status(403).json({ message: 'Anda belum terdaftar sebagai Mitra.' });
     }
 
-    // Ambil semua ID Service yang dimiliki Provider dan AKTIF
     const myServiceIds = provider.services
       .filter(s => s.isActive)
       .map(s => s.serviceId.toString());
-
-    // Logic: Order masuk adalah order basic yang BELUM diambil (providerId: null)
-    // DAN item di dalam order tersebut HARUS sesuai dengan layanan yang dimiliki provider.
-    // Jika order memiliki multiple item, kita cek apakah provider punya SALAH SATU layanan tersebut (bisa disesuaikan jadi 'ALL' jika perlu).
     
     const orders = await Order.find({
       $or: [
@@ -432,7 +441,7 @@ async function listIncomingOrders(req, res, next) {
         },
         { 
           providerId: provider._id,
-          status: 'paid' // Direct order yang sudah dibayar masuk sini
+          status: 'paid'
         }
       ]
     })
@@ -459,11 +468,10 @@ async function acceptOrder(req, res, next) {
     }
 
     const order = await Order.findById(orderId);
-    if (!order) {
+    if (! order) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan.' });
     }
 
-    // Validasi status order sebelum diterima
     const validStatuses = ['searching', 'paid'];
     if (!validStatuses.includes(order.status)) {
       return res.status(400).json({ 
@@ -494,7 +502,7 @@ async function acceptOrder(req, res, next) {
     order.providerId = provider._id;
     await order.save();
 
-    res.json({ message: 'Pesanan berhasil diterima! Segera hubungi pelanggan.', data: order });
+    res.json({ message: 'Pesanan berhasil diterima!  Segera hubungi pelanggan.', data: order });
   } catch (error) {
     next(error);
   }
@@ -521,8 +529,6 @@ async function updateOrderStatus(req, res, next) {
       return res.status(403).json({ message: 'Anda tidak memiliki akses ke pesanan ini' });
     }
 
-    // [FIXED] PROVIDER FLOW: Completed -> Waiting Approval
-    // Provider menekan tombol "Pekerjaan Selesai", mengirim status 'waiting_approval'
     if (status === 'waiting_approval' && isProvider) {
       if (order.status !== 'working') {
         return res.status(400).json({ 
@@ -532,12 +538,11 @@ async function updateOrderStatus(req, res, next) {
       order.status = 'waiting_approval';
       await order.save();
       return res.json({ 
-        message: 'Pekerjaan ditandai selesai. Menunggu konfirmasi pelanggan.', 
+        message: 'Pekerjaan ditandai selesai.Menunggu konfirmasi pelanggan.', 
         data: order 
       });
     }
 
-    // CUSTOMER FLOW: Confirm Completion
     if (status === 'completed' && isCustomer) {
       if (order.status !== 'waiting_approval') {
         return res.status(400).json({ 
@@ -549,7 +554,6 @@ async function updateOrderStatus(req, res, next) {
       return res.json({ message: 'Pesanan selesai! Terima kasih.', data: order });
     }
 
-    // PROVIDER FLOW: Start Journey & Start Working
     if (['on_the_way', 'working'].includes(status)) {
       if (! isProvider) {
         return res.status(403).json({ 
@@ -562,7 +566,7 @@ async function updateOrderStatus(req, res, next) {
         'working': ['on_the_way']
       };
       
-      if (! statusFlow[status].includes(order.status)) {
+      if (!  statusFlow[status].includes(order.status)) {
         return res.status(400).json({ 
           message: `Tidak bisa mengubah status dari "${order.status}" ke "${status}".` 
         });
@@ -573,7 +577,6 @@ async function updateOrderStatus(req, res, next) {
       return res.json({ message: `Status diubah menjadi ${status}`, data: order });
     }
 
-    // CANCEL FLOW
     if (status === 'cancelled') {
       const nonCancellableStatuses = ['completed', 'working', 'waiting_approval'];
       
