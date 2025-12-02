@@ -6,9 +6,9 @@ const { validateVoucherCheck, validateVoucherClaim } = require('./validators');
 const { runValidation } = require('../../middlewares/validator'); 
 
 // 1. [PUBLIC] List Voucher Marketplace (Yang bisa diklaim)
-// Bisa diakses tanpa login (opsional) atau dengan login.
-// Di sini kita pakai auth agar bisa filter voucher yang SUDAH diklaim user.
-router.get('/available', authenticate, voucherController.listAvailableVouchers);
+// [UPDATE] Middleware 'authenticate' DIHAPUS agar Guest bisa lihat voucher.
+// Controller 'listAvailableVouchers' sekarang menangani cek token secara manual.
+router.get('/available', voucherController.listAvailableVouchers);
 
 // 2. [PRIVATE] List Voucher Saya (Yang sudah diklaim)
 router.get('/my', authenticate, voucherController.listMyVouchers);

@@ -1,30 +1,54 @@
 const Voucher = require('./model');
 const UserVoucher = require('./userVoucherModel');
 const Service = require('../services/model');
+const jwt = require('jsonwebtoken'); // [BARU] Import JWT
+const env = require('../../config/env'); // [BARU] Import Env
 
 // 1. LIST AVAILABLE VOUCHERS (MARKETPLACE)
-// Menampilkan voucher global yang BELUM diklaim user
+// Menampilkan voucher global yang BELUM diklaim user (Support Guest & Logged User)
 async function listAvailableVouchers(req, res, next) {
   try {
-    const userId = req.user.userId;
+    let userId = null;
     const now = new Date();
 
-    // Ambil ID voucher yang sudah diklaim user ini
-    const claimedVouchers = await UserVoucher.find({ userId }).select('voucherId');
-    const claimedVoucherIds = claimedVouchers.map(uv => uv.voucherId);
+    // [LOGIKA BARU] Cek Token Manual (Optional Auth)
+    // Kita tidak pakai middleware 'authenticate' di route ini agar Guest tetap bisa akses.
+    const authHeader = req.headers.authorization || '';
+    if (authHeader.startsWith('Bearer ')) {
+       const token = authHeader.split(' ')[1];
+       try {
+          const decoded = jwt.verify(token, env.jwtSecret);
+          userId = decoded.userId;
+       } catch (err) {
+          // Token invalid/expired -> Anggap sebagai Guest (ignore error)
+          userId = null;
+       }
+    }
+
+    // Filter ID voucher yang sudah diklaim (hanya jika user login)
+    let claimedVoucherIds = [];
+    if (userId) {
+      const claimedVouchers = await UserVoucher.find({ userId }).select('voucherId');
+      claimedVoucherIds = claimedVouchers.map(uv => uv.voucherId);
+    }
 
     // Cari voucher master yang:
     // 1. Aktif
     // 2. Kuota > 0
     // 3. Belum expired
-    // 4. ID-nya TIDAK ada di daftar claimedVoucherIds
-    const vouchers = await Voucher.find({
+    // 4. [Jika Login] ID-nya TIDAK ada di daftar claimedVoucherIds
+    const query = {
       isActive: true,
       quota: { $gt: 0 },
-      expiryDate: { $gt: now },
-      _id: { $nin: claimedVoucherIds } // Exclude yang sudah punya
-    })
-    .populate('applicableServices', 'name') // Opsional: Tampilkan nama service jika spesifik
+      expiryDate: { $gt: now }
+    };
+
+    if (claimedVoucherIds.length > 0) {
+      query._id = { $nin: claimedVoucherIds };
+    }
+
+    const vouchers = await Voucher.find(query)
+    .populate('applicableServices', 'name')
     .sort({ createdAt: -1 });
 
     res.json({ 
