@@ -1,3 +1,5 @@
+const { validationResult } = require('express-validator');
+
 // Middleware sederhana untuk memvalidasi field-body yang wajib diisi
 function validateBody(requiredFields = []) {
   return (req, res, next) => {
