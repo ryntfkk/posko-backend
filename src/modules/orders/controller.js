@@ -6,6 +6,8 @@ const Service = require('../services/model');
 const Settings = require('../settings/model');
 const Voucher = require('../vouchers/model');
 const UserVoucher = require('../vouchers/userVoucherModel');
+const User = require('../../models/User');
+const Earnings = require('../earnings/model');
 
 // [CONFIG] Default Timezone Configuration
 const DEFAULT_TIMEZONE = 'Asia/Jakarta';
@@ -70,7 +72,7 @@ async function listOrders(req, res, next) {
       }
     } 
     
-    if (roles.includes('admin') && !   view) {
+    if (roles.includes('admin') && !    view) {
       filter = {}; 
     }
 
@@ -87,7 +89,7 @@ async function listOrders(req, res, next) {
       .lean();
 
     const messageKey = 'orders.list';
-    res.json({ messageKey, message: req.t ?    req.t(messageKey) : 'List Orders', data: orders });
+    res.json({ messageKey, message: req.t ?     req.t(messageKey) : 'List Orders', data: orders });
   } catch (error) {
     next(error);
   }
@@ -130,7 +132,7 @@ async function createOrder(req, res, next) {
     let providerSnapshot = {};
 
     if (orderType === 'direct') {
-      if (!  providerId) {
+      if (!   providerId) {
         await session.abortTransaction();
         return res.status(400).json({ message: 'Provider ID wajib untuk Direct Order' });
       }
@@ -165,7 +167,7 @@ async function createOrder(req, res, next) {
     const validatedItems = [];
 
     for (const item of items) {
-      if (!item.serviceId) continue;
+      if (! item.serviceId) continue;
 
       const serviceDoc = serviceMap.get(item.serviceId.toString());
       if (!serviceDoc) {
@@ -182,7 +184,7 @@ async function createOrder(req, res, next) {
           ps => ps.serviceId && ps.serviceId.toString() === item.serviceId.toString() && ps.isActive
         );
 
-        if (!  providerService) {
+        if (!   providerService) {
           await session.abortTransaction();
           return res.status(400).json({ 
             message: `Mitra ini tidak menyediakan layanan "${serviceDoc.name}".` 
@@ -207,7 +209,7 @@ async function createOrder(req, res, next) {
     }
     
     const settings = await Settings.findOne({ key: 'global_config' }).session(session);
-    const adminFee = settings ?   settings.adminFee : 2500;
+    const adminFee = settings ?    settings.adminFee : 2500;
 
     // --- [FIXED] VOUCHER LOGIC WITH ATOMIC TRANSACTION ---
     let discountAmount = 0;
@@ -223,14 +225,14 @@ async function createOrder(req, res, next) {
         match: { code: voucherCode.toUpperCase() }
       }).session(session);
 
-      if (!  userVoucher || ! userVoucher.voucherId) {
+      if (!   userVoucher || !  userVoucher.voucherId) {
         await session.abortTransaction();
         return res.status(404).json({ message: 'Voucher tidak valid atau belum diklaim.' });
       }
 
       const voucher = userVoucher.voucherId;
       const now = new Date();
-      if (!  voucher.isActive || new Date(voucher.expiryDate) < now) {
+      if (!   voucher.isActive || new Date(voucher.expiryDate) < now) {
         await session.abortTransaction();
         return res.status(400).json({ message: 'Voucher sudah kadaluarsa' });
       }
@@ -305,7 +307,7 @@ async function createOrder(req, res, next) {
       const targetOffset = providerData.timeZoneOffset || DEFAULT_OFFSET;
 
       const scheduled = getLocalDateComponents(scheduledAt, targetTimeZone);
-      if (!   scheduled) {
+      if (!    scheduled) {
         await session.abortTransaction();
         return res.status(400).json({ message: 'Format tanggal kunjungan tidak valid.' });
       }
@@ -502,7 +504,7 @@ async function acceptOrder(req, res, next) {
     }
 
     const validStatuses = ['searching', 'paid'];
-    if (! validStatuses.includes(order.status)) {
+    if (!  validStatuses.includes(order.status)) {
       return res.status(400).json({ 
         message: 'Pesanan ini sudah tidak tersedia, sudah diambil, atau belum dibayar.' 
       });
@@ -543,7 +545,7 @@ async function acceptOrder(req, res, next) {
     order.providerId = provider._id;
     await order.save();
 
-    res.json({ message: 'Pesanan berhasil diterima!   Segera hubungi pelanggan.', data: order });
+    res.json({ message: 'Pesanan berhasil diterima!    Segera hubungi pelanggan.', data: order });
   } catch (error) {
     next(error);
   }
@@ -590,13 +592,80 @@ async function updateOrderStatus(req, res, next) {
           message: 'Belum ada permintaan penyelesaian dari mitra.' 
         });
       }
-      order.status = 'completed';
-      await order.save();
-      return res.json({ message: 'Pesanan selesai! Terima kasih.', data: order });
+
+      // [NEW] CALCULATE EARNINGS KETIKA ORDER SELESAI
+      try {
+        const settings = await Settings.findOne({ key: 'global_config' });
+        const platformCommissionPercent = settings ?  settings.platformCommissionPercent : 12;
+        
+        // Hitung earnings: (totalAmount - adminFee) - (komisi platform)
+        const serviceRevenue = order.totalAmount - order.adminFee;
+        const platformCommissionAmount = (serviceRevenue * platformCommissionPercent) / 100;
+        const earningsAmount = serviceRevenue - platformCommissionAmount;
+
+        // Update order status
+        order.status = 'completed';
+        await order.save();
+
+        // Update provider balance
+        const providerUser = await User.findByIdAndUpdate(
+          order.providerId,
+          { $inc: { balance: earningsAmount } },
+          { new: true }
+        );
+
+        // Cari provider document untuk diupdate
+        const providerDoc = await Provider.findOne({ userId: order.providerId });
+
+        // Catat di earnings history
+        const earningsRecord = new Earnings({
+          providerId: providerDoc._id,
+          userId: order.providerId,
+          orderId: order._id,
+          totalAmount: order.totalAmount,
+          adminFee: order.adminFee,
+          platformCommissionPercent: platformCommissionPercent,
+          platformCommissionAmount: Math.round(platformCommissionAmount),
+          earningsAmount: Math.round(earningsAmount),
+          status: 'completed',
+          completedAt: new Date()
+        });
+
+        await earningsRecord.save();
+
+        console.log(`✅ Earnings recorded for order ${order._id}: Rp ${Math.round(earningsAmount).toLocaleString('id-ID')}`);
+
+        return res.json({ 
+          message: 'Pesanan selesai!  Terima kasih.', 
+          data: {
+            order: order,
+            earnings: {
+              totalAmount: order.totalAmount,
+              adminFee: order.adminFee,
+              serviceRevenue: serviceRevenue,
+              platformCommissionPercent: platformCommissionPercent,
+              platformCommissionAmount: Math.round(platformCommissionAmount),
+              earningsAmount: Math.round(earningsAmount)
+            },
+            providerBalance: providerUser.balance
+          }
+        });
+
+      } catch (earningsError) {
+        console.error('❌ Error calculating earnings:', earningsError);
+        // Tetap update order status meskipun earnings gagal dicatat
+        order.status = 'completed';
+        await order.save();
+        return res.status(500).json({ 
+          message: 'Pesanan selesai tapi ada error saat mencatat earnings', 
+          data: order,
+          error: earningsError.message 
+        });
+      }
     }
 
     if (['on_the_way', 'working'].includes(status)) {
-      if (!  isProvider) {
+      if (!   isProvider) {
         return res.status(403).json({ 
           message: 'Hanya mitra yang bisa update status ini.' 
         });
@@ -607,7 +676,7 @@ async function updateOrderStatus(req, res, next) {
         'working': ['on_the_way']
       };
       
-      if (!   statusFlow[status].includes(order.status)) {
+      if (!    statusFlow[status].includes(order.status)) {
         return res.status(400).json({ 
           message: `Tidak bisa mengubah status dari "${order.status}" ke "${status}".` 
         });
