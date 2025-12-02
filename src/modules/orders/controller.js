@@ -607,20 +607,26 @@ async function updateOrderStatus(req, res, next) {
         order.status = 'completed';
         await order.save();
 
-        // Update provider balance
+        const providerDoc = await Provider.findById(order.providerId);
+        if (!providerDoc) {
+          throw new Error('Data mitra (provider) tidak ditemukan saat memproses earnings.');
+        }
+
+        // 2. Gunakan providerDoc.userId untuk update saldo User
         const providerUser = await User.findByIdAndUpdate(
-          order.providerId,
+          providerDoc.userId, 
           { $inc: { balance: earningsAmount } },
           { new: true }
         );
 
-        // Cari provider document untuk diupdate
-        const providerDoc = await Provider.findOne({ userId: order.providerId });
+        if (!providerUser) {
+          throw new Error('Data user mitra tidak ditemukan.');
+        }
 
-        // Catat di earnings history
+        // 3. Catat di earnings history dengan referensi yang benar
         const earningsRecord = new Earnings({
-          providerId: providerDoc._id,
-          userId: order.providerId,
+          providerId: providerDoc._id,  // ID Dokumen Provider
+          userId: providerDoc.userId,   // ID User milik Mitra
           orderId: order._id,
           totalAmount: order.totalAmount,
           adminFee: order.adminFee,
