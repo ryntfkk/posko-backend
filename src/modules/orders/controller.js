@@ -578,6 +578,15 @@ async function updateOrderStatus(req, res, next) {
           message: 'Hanya pesanan yang sedang dikerjakan yang bisa diselesaikan.' 
         });
       }
+      
+      // [NEW] Validasi Dokumentasi Penyelesaian
+      // Provider wajib upload minimal 1 bukti foto sebelum menyelesaikan pekerjaan
+      if (!order.completionEvidence || order.completionEvidence.length === 0) {
+        return res.status(400).json({ 
+          message: 'Wajib mengunggah minimal 1 foto dokumentasi pekerjaan selesai sebelum mengubah status.' 
+        });
+      }
+
       order.status = 'waiting_approval';
       await order.save();
       return res.json({ 
@@ -714,11 +723,106 @@ async function updateOrderStatus(req, res, next) {
   }
 }
 
+// 7. [BARU] REQUEST ADDITIONAL FEE
+async function requestAdditionalFee(req, res, next) {
+  try {
+    const { orderId } = req.params;
+    const { description, amount } = req.body;
+    const userId = req.user.userId;
+
+    if (!description || !amount || amount <= 0) {
+      return res.status(400).json({ message: 'Deskripsi dan jumlah biaya harus valid.' });
+    }
+
+    const provider = await Provider.findOne({ userId });
+    const order = await Order.findById(orderId);
+
+    if (!order) {
+      return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
+    }
+
+    // Pastikan yang request adalah provider yang menangani order ini
+    if (!order.providerId || !provider || order.providerId.toString() !== provider._id.toString()) {
+      return res.status(403).json({ message: 'Anda tidak memiliki akses untuk request biaya tambahan pada order ini.' });
+    }
+
+    // Hanya bisa request jika status 'working'
+    if (order.status !== 'working') {
+      return res.status(400).json({ message: 'Biaya tambahan hanya bisa diajukan saat status "working".' });
+    }
+
+    order.additionalFees.push({
+      description,
+      amount,
+      status: 'pending_approval'
+    });
+
+    await order.save();
+
+    res.status(201).json({ 
+      message: 'Permintaan biaya tambahan berhasil diajukan.',
+      data: order
+    });
+
+  } catch (error) {
+    next(error);
+  }
+}
+
+// 8. [BARU] UPLOAD COMPLETION EVIDENCE
+async function uploadCompletionEvidence(req, res, next) {
+  try {
+    const { orderId } = req.params;
+    const userId = req.user.userId;
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'File gambar wajib diupload.' });
+    }
+
+    const provider = await Provider.findOne({ userId });
+    const order = await Order.findById(orderId);
+
+    if (!order) {
+      return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
+    }
+
+    // Pastikan yang upload adalah provider yang menangani
+    if (!order.providerId || !provider || order.providerId.toString() !== provider._id.toString()) {
+      return res.status(403).json({ message: 'Anda tidak memiliki akses untuk upload bukti pekerjaan ini.' });
+    }
+
+    // Hanya bisa upload jika status 'working'
+    if (order.status !== 'working') {
+      return res.status(400).json({ message: 'Bukti pekerjaan hanya bisa diupload saat status "working".' });
+    }
+
+    const evidence = {
+      url: `/uploads/${req.file.filename}`, // Sesuaikan path statis
+      type: 'photo',
+      description: req.body.description || 'Bukti penyelesaian pekerjaan',
+      uploadedAt: new Date()
+    };
+
+    order.completionEvidence.push(evidence);
+    await order.save();
+
+    res.status(201).json({ 
+      message: 'Bukti pekerjaan berhasil diupload.',
+      data: order
+    });
+
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = { 
   listOrders, 
   createOrder, 
   getOrderById, 
   listIncomingOrders,
   acceptOrder,
-  updateOrderStatus
+  updateOrderStatus,
+  requestAdditionalFee, // [BARU]
+  uploadCompletionEvidence // [BARU]
 };

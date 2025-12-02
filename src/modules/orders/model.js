@@ -16,7 +16,7 @@ const orderItemSchema = new mongoose.Schema({
   note: { type: String }
 });
 
-// ============ ATTACHMENT SCHEMA (BARU) ============
+// ============ ATTACHMENT SCHEMA ============
 const attachmentSchema = new mongoose.Schema({
   url: { type: String, required: true },
   type: { 
@@ -26,6 +26,18 @@ const attachmentSchema = new mongoose.Schema({
   },
   description: { type: String, default: '' },
   uploadedAt: { type: Date, default: Date.now }
+});
+
+// ============ ADDITIONAL FEE SCHEMA (BARU) ============
+const additionalFeeSchema = new mongoose.Schema({
+  description: { type: String, required: true },
+  amount: { type: Number, required: true },
+  status: {
+    type: String,
+    enum: ['pending_approval', 'approved_unpaid', 'paid', 'rejected'],
+    default: 'pending_approval'
+  },
+  paymentId: { type: String, default: null }
 });
 
 // ============ MAIN ORDER SCHEMA ============
@@ -94,6 +106,9 @@ const orderSchema = new mongoose.Schema(
     },
     // =====================================================
 
+    // [BARU] BIAYA TAMBAHAN (ADDITIONAL FEES)
+    additionalFees: [additionalFeeSchema],
+
     scheduledAt: {
       type: Date,
       required: [true, 'Tanggal kunjungan (scheduledAt) wajib diisi'],
@@ -134,8 +149,11 @@ const orderSchema = new mongoose.Schema(
       accessNote: { type: String, default: '' }      // Catatan akses khusus
     },
 
-    // ============ LAMPIRAN/DOKUMENTASI (HIGH) ============
+    // ============ LAMPIRAN/DOKUMENTASI AWAL (HIGH) ============
     attachments: [attachmentSchema],
+
+    // [BARU] DOKUMENTASI PENYELESAIAN PEKERJAAN
+    completionEvidence: [attachmentSchema],
 
     // ============ EXISTING FIELDS ============
     shippingAddress: {
