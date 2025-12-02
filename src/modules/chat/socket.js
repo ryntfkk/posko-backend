@@ -47,7 +47,25 @@ function initSocket(httpServer) {
         const { roomId, content } = data;
         const senderId = socket.user.userId;
 
-        // Simpan ke Database
+        // [FIX POINT 2] Validasi Kepemilikan Room (Security)
+        // Cek apakah room ada DAN pengirim adalah partisipan yang sah
+        const chatCheck = await Chat.findById(roomId);
+        if (!chatCheck) {
+          return console.error(`Chat room ${roomId} not found.`);
+        }
+
+        // Convert ID ke string untuk perbandingan yang aman
+        const isParticipant = chatCheck.participants.some(
+          p => p.toString() === senderId
+        );
+
+        if (!isParticipant) {
+          console.error(`Unauthorized message attempt by ${senderId} to room ${roomId}`);
+          // Opsional: Emit error event ke pengirim
+          return socket.emit('error_message', { message: 'Anda bukan anggota percakapan ini.' });
+        }
+
+        // Simpan ke Database (Aman)
         const chat = await Chat.findByIdAndUpdate(
           roomId, 
           { 

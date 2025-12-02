@@ -56,6 +56,16 @@ const orderSchema = new mongoose.Schema(
       default: null,
       index: true
     },
+    
+    // [OPTIMIZATION] Snapshot Data Provider (Point 6)
+    // Menyimpan info provider saat order dibuat agar query list tidak berat (N+1 problem fix)
+    providerSnapshot: {
+      fullName: { type: String },
+      profilePictureUrl: { type: String },
+      phoneNumber: { type: String },
+      rating: { type: Number }
+    },
+
     items: [orderItemSchema],
     status: {
       type: String,

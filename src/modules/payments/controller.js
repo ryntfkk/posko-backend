@@ -103,9 +103,6 @@ async function createPayment(req, res, next) {
     }
 
     // [SAFETY CHECK] Pastikan perhitungan JS sama dengan data di DB
-    // Jika berbeda 1-2 perak karena pembulatan, kita gunakan totalAmount DB sebagai acuan utama
-    // tapi tetap kirim item_details yang sudah kita susun.
-    // Peringatan: Jika selisihnya besar, transaksi Midtrans mungkin akan reject.
     if (Math.abs(calculatedGrossAmount - order.totalAmount) > 5) {
        console.warn(`⚠️ Mismatch Warning: Calculated Items (${calculatedGrossAmount}) vs Order Total (${order.totalAmount})`);
     }
@@ -158,10 +155,6 @@ async function handleNotification(req, res, next) {
     const notification = req.body;
     
     // [SECURITY FIX] Verifikasi Signature Key Midtrans
-    // Pastikan gross_amount dikonversi ke string tanpa desimal .00 jika integer di DB, 
-    // atau biarkan sesuai format Midtrans jika perlu.
-    // Midtrans biasanya mengirim gross_amount sebagai string dengan .00 (misal: "15000.00")
-    
     const { order_id, status_code, gross_amount, signature_key } = notification;
     const serverKey = env.midtransKey;
 
@@ -170,15 +163,13 @@ async function handleNotification(req, res, next) {
         return res.status(400).json({ message: 'Invalid notification payload' });
     }
 
-    // Pastikan gross_amount sesuai format yang dikirim Midtrans (biasanya string)
-    // Hati-hati: jangan parse ke int lalu string lagi jika Midtrans kirim desimal.
-    // Kita gunakan nilai mentah dari notification.
+    // 1. Validasi Signature
+    // Gunakan gross_amount mentah dari payload (string/number) persis seperti yang dikirim Midtrans
     const signatureInput = `${order_id}${status_code}${gross_amount}${serverKey}`;
     const expectedSignature = crypto.createHash('sha512').update(signatureInput).digest('hex');
 
     if (signature_key !== expectedSignature) {
         console.error(`🚨 Security Alert: Invalid Signature detected! Order: ${order_id}`);
-        // Return 403 atau 200 (untuk mencegah retry spam midtrans jika yakin invalid)
         return res.status(403).json({ message: 'Invalid signature key' });
     }
 
@@ -186,17 +177,34 @@ async function handleNotification(req, res, next) {
     const fraudStatus = notification.fraud_status;
     const orderIdFull = notification.order_id; 
 
-    // 1. Ekstrak Order ID Asli
+    // 2. Ekstrak Order ID Asli MongoDB
     const splitOrderId = orderIdFull.split('-');
     const realOrderId = splitOrderId[1]; 
 
-    // 2.Validasi ID MongoDB
     if (!realOrderId || !mongoose.Types.ObjectId.isValid(realOrderId)) {
         console.log(`⚠️ Ignored invalid Order ID: ${realOrderId}`);
         return res.status(200).json({ message: 'Invalid Order ID ignored' });
     }
 
-    // 3.Tentukan Status Pembayaran
+    // 3. [CRITICAL] Validasi Amount dengan Database
+    // Mencegah serangan manipulasi nominal (User bayar lebih murah dari seharusnya)
+    const order = await Order.findById(realOrderId);
+    if (!order) {
+        return res.status(404).json({ message: 'Order not found in DB' });
+    }
+
+    // Konversi gross_amount ke Number untuk perbandingan (Midtrans mungkin kirim string "10000.00")
+    const notifAmount = parseFloat(gross_amount);
+    const dbAmount = order.totalAmount;
+
+    // Toleransi selisih kecil akibat floating point (opsional, set strict jika perlu)
+    if (Math.abs(notifAmount - dbAmount) > 5) { 
+        console.error(`🚨 Fraud Alert: Amount mismatch! Paid: ${notifAmount}, Bill: ${dbAmount}`);
+        // Jangan proses status order, kembalikan 200 agar Midtrans tidak retry (karena ini fraud/error permanen)
+        return res.status(200).json({ message: 'Amount mismatch ignored' });
+    }
+
+    // 4. Tentukan Status Pembayaran
     let paymentStatus = 'pending';
     if (transactionStatus == 'capture') {
         if (fraudStatus == 'challenge') {
@@ -212,20 +220,14 @@ async function handleNotification(req, res, next) {
 
     console.log(`🔔 Webhook: ${realOrderId} status ${paymentStatus} (${transactionStatus})`);
 
-    // 4.Update Database
+    // 5. Update Database (Payment & Order)
     if (paymentStatus === 'paid') {
         await Payment.findOneAndUpdate({ orderId: realOrderId }, { status: 'paid' });
         
-        const order = await Order.findById(realOrderId);
-        if (order) {
-            // Jika Direct Order -> Status 'paid' (Menunggu konfirmasi Provider)
-            // Jika Basic Order  -> Status 'searching' (Mencari Provider via broadcast)
-            
-            // Cek dulu agar tidak menimpa status jika sudah diproses lanjut (misal accepted/working)
-            if (['pending', 'cancelled', 'failed'].includes(order.status)) {
-                const nextStatus = order.orderType === 'direct' ? 'paid' : 'searching';
-                await Order.findByIdAndUpdate(realOrderId, { status: nextStatus });
-            }
+        // Cek dulu agar tidak menimpa status jika sudah diproses lanjut
+        if (['pending', 'cancelled', 'failed'].includes(order.status)) {
+            const nextStatus = order.orderType === 'direct' ? 'paid' : 'searching';
+            await Order.findByIdAndUpdate(realOrderId, { status: nextStatus });
         }
     } else if (paymentStatus === 'failed') {
         await Payment.findOneAndUpdate({ orderId: realOrderId }, { status: 'failed' });
@@ -236,7 +238,8 @@ async function handleNotification(req, res, next) {
 
   } catch (error) {
     console.error('❌ Webhook Error:', error);
-    res.status(200).json({ message: 'Error handled' }); 
+    // Return 500 jika error internal agar Midtrans retry
+    res.status(500).json({ message: 'Internal Server Error' }); 
   }
 }
 

@@ -1,4 +1,5 @@
 // src/modules/orders/controller.js
+const mongoose = require('mongoose'); // [ADDED] Diperlukan untuk Transaction
 const Order = require('./model');
 const Provider = require('../providers/model');
 const Service = require('../services/model');
@@ -84,9 +85,13 @@ async function listOrders(req, res, next) {
 
 // 2.CREATE ORDER
 async function createOrder(req, res, next) {
+  const session = await mongoose.startSession(); // [FIX POINT 4] Start Session
+  session.startTransaction();
+
   try {
     const userId = req.user?.userId;
     if (! userId) {
+      await session.abortTransaction();
       return res.status(401).json({ message: 'Unauthorized' });
     }
 
@@ -102,34 +107,34 @@ async function createOrder(req, res, next) {
       propertyDetails,
       scheduledTimeSlot,
       attachments,
-      voucherCode // [BARU] Menerima kode voucher dari frontend
+      voucherCode 
     } = req.body;
 
     if (items.length === 0) {
+      await session.abortTransaction();
       return res.status(400).json({ message: 'Items tidak boleh kosong' });
     }
 
-    // --- [OPTIMIZED] FETCH SERVICES SEKALI JALAN (Mencegah N+1 Query) ---
+    // --- [OPTIMIZED] FETCH SERVICES SEKALI JALAN ---
     const serviceIds = items.map(item => item.serviceId).filter(Boolean);
-    const foundServices = await Service.find({ _id: { $in: serviceIds } });
+    const foundServices = await Service.find({ _id: { $in: serviceIds } }).session(session);
     
-    // Buat Map untuk akses cepat: ID -> Service Object
     const serviceMap = new Map(foundServices.map(s => [s._id.toString(), s]));
 
     let servicesSubtotal = 0;
     const validatedItems = [];
 
-    // Loop items dari request dan ambil data dari Map
     for (const item of items) {
       if (!item.serviceId) continue;
 
       const serviceDoc = serviceMap.get(item.serviceId.toString());
       if (!serviceDoc) {
+        await session.abortTransaction();
         return res.status(400).json({ message: `Service ID ${item.serviceId} tidak ditemukan.` });
       }
 
       const quantity = parseInt(item.quantity) || 1;
-      const realPrice = serviceDoc.price || serviceDoc.basePrice; // Fallback ke basePrice
+      const realPrice = serviceDoc.price || serviceDoc.basePrice; 
       const subTotal = realPrice * quantity;
 
       servicesSubtotal += subTotal;
@@ -143,40 +148,35 @@ async function createOrder(req, res, next) {
       });
     }
     
-    // --- [UPDATED] FETCH ADMIN FEE DARI DB ---
-    const settings = await Settings.findOne({ key: 'global_config' });
-    // Gunakan 2500 sebagai default jika settings belum diinisialisasi
+    const settings = await Settings.findOne({ key: 'global_config' }).session(session);
     const adminFee = settings ? settings.adminFee : 2500;
 
-    // --- [FIXED] VOUCHER LOGIC WITH LOCKING ---
+    // --- [FIXED] VOUCHER LOGIC WITH ATOMIC TRANSACTION ---
     let discountAmount = 0;
     let voucherId = null;
-    let lockedUserVoucher = null; // Menyimpan instance voucher yang sudah di-lock statusnya
+    let lockedUserVoucher = null; 
 
     if (voucherCode) {
-      // 1. Cek kepemilikan voucher di UserVoucher (Wajib Klaim Dulu)
       const userVoucher = await UserVoucher.findOne({ 
         userId,
         status: 'active'
       }).populate({
         path: 'voucherId',
         match: { code: voucherCode.toUpperCase() }
-      });
+      }).session(session);
 
-      // Jika tidak ditemukan atau voucherId null (karena match gagal)
       if (!userVoucher || !userVoucher.voucherId) {
+        await session.abortTransaction();
         return res.status(404).json({ message: 'Voucher tidak valid atau belum diklaim.' });
       }
 
       const voucher = userVoucher.voucherId;
-
-      // 2. Validasi Master Voucher (Aktif & Expiry)
       const now = new Date();
       if (!voucher.isActive || new Date(voucher.expiryDate) < now) {
+        await session.abortTransaction();
         return res.status(400).json({ message: 'Voucher sudah kadaluarsa' });
       }
 
-      // 3. Hitung Eligible Total
       let eligibleForDiscountTotal = 0;
       const applicableServiceIds = voucher.applicableServices.map(id => id.toString());
       const isGlobalVoucher = applicableServiceIds.length === 0;
@@ -192,40 +192,36 @@ async function createOrder(req, res, next) {
         }
       });
 
-      // 4. Validasi Min Purchase
       if (eligibleForDiscountTotal === 0) {
+        await session.abortTransaction();
         return res.status(400).json({ 
           message: 'Voucher ini tidak berlaku untuk layanan yang Anda pilih.' 
         });
       }
 
       if (eligibleForDiscountTotal < voucher.minPurchase) {
+        await session.abortTransaction();
         return res.status(400).json({ 
           message: `Minimal pembelian layanan yang valid untuk voucher ini adalah Rp ${voucher.minPurchase.toLocaleString()}` 
         });
       }
 
-      // 5. Hitung Diskon
       if (voucher.discountType === 'percentage') {
         discountAmount = (eligibleForDiscountTotal * voucher.discountValue) / 100;
         if (voucher.maxDiscount > 0 && discountAmount > voucher.maxDiscount) {
           discountAmount = voucher.maxDiscount;
         }
       } else {
-        // Fixed Amount
         discountAmount = voucher.discountValue;
       }
 
-      // Cap diskon tidak boleh melebihi total yang eligible
       if (discountAmount > eligibleForDiscountTotal) {
         discountAmount = eligibleForDiscountTotal;
       }
 
       voucherId = voucher._id;
 
-      // 6. [CRITICAL] LOCK VOUCHER (Optimistic Locking)
-      // Ubah status jadi 'used' SEBELUM simpan order.
-      // Ini mencegah user memakai voucher yang sama di request concurrent.
+      // [CRITICAL FIX POINT 4] Lock Voucher using Session
       lockedUserVoucher = await UserVoucher.findOneAndUpdate(
         { 
           _id: userVoucher._id, 
@@ -235,31 +231,46 @@ async function createOrder(req, res, next) {
           status: 'used',
           usageDate: new Date()
         },
-        { new: true }
+        { new: true, session: session } // Inject Session Here
       );
 
       if (!lockedUserVoucher) {
+        await session.abortTransaction();
         return res.status(400).json({ message: 'Voucher gagal digunakan atau sudah terpakai.' });
       }
     }
 
-    // --- [UPDATED] FINAL TOTAL CALCULATION ---
     const finalTotalAmount = servicesSubtotal + adminFee - discountAmount;
+
+    // --- [FIX POINT 6] Prepare Snapshot Data ---
+    let providerSnapshot = {};
 
     // --- VALIDASI JADWAL UNTUK DIRECT ORDER ---
     if (orderType === 'direct') {
       if (!providerId) {
-        // Jangan lupa Rollback voucher jika validasi gagal
-        if (lockedUserVoucher) {
-           await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { status: 'active', usageDate: null });
-        }
+        await session.abortTransaction();
         return res.status(400).json({ message: 'Provider ID wajib untuk Direct Order' });
       }
 
-      const provider = await Provider.findById(providerId).lean();
+      // [FIX POINT 6] Populate User info untuk Snapshot
+      const provider = await Provider.findById(providerId)
+        .populate('userId', 'fullName profilePictureUrl phoneNumber')
+        .session(session)
+        .lean();
+
       if (! provider) {
-        if (lockedUserVoucher) await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { status: 'active', usageDate: null });
+        await session.abortTransaction();
         return res.status(404).json({ message: 'Mitra tidak ditemukan atau tidak aktif.' });
+      }
+
+      // Isi Snapshot Data
+      if (provider.userId) {
+        providerSnapshot = {
+          fullName: provider.userId.fullName,
+          profilePictureUrl: provider.userId.profilePictureUrl,
+          phoneNumber: provider.userId.phoneNumber,
+          rating: provider.rating || 0
+        };
       }
       
       const targetTimeZone = provider.timeZone || DEFAULT_TIMEZONE;
@@ -267,19 +278,17 @@ async function createOrder(req, res, next) {
 
       const scheduled = getLocalDateComponents(scheduledAt, targetTimeZone);
       if (! scheduled) {
-        if (lockedUserVoucher) await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { status: 'active', usageDate: null });
+        await session.abortTransaction();
         return res.status(400).json({ message: 'Format tanggal kunjungan tidak valid.' });
       }
 
-      // Validasi 0: Pastikan pesanan tidak Backdated
       const now = new Date();
       const oneHourBefore = new Date(now.getTime() - 60 * 60 * 1000);
       if (scheduled.fullDate < oneHourBefore) {
-         if (lockedUserVoucher) await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { status: 'active', usageDate: null });
+         await session.abortTransaction();
          return res.status(400).json({ message: 'Tanggal kunjungan tidak boleh di masa lalu.' });
       }
 
-      // Validasi 1: Cek Blokir Manual
       if (provider.blockedDates && provider.blockedDates.length > 0) {
         const isBlocked = provider.blockedDates.some(blockedDate => {
           const blocked = getLocalDateComponents(blockedDate, targetTimeZone);
@@ -287,14 +296,13 @@ async function createOrder(req, res, next) {
         });
         
         if (isBlocked) {
-          if (lockedUserVoucher) await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { status: 'active', usageDate: null });
+          await session.abortTransaction();
           return res.status(400).json({
             message: 'Tanggal kunjungan ini diblokir manual oleh Mitra (Libur). Pilih tanggal lain.'
           });
         }
       }
 
-      // Validasi 2: Double Booking Check
       const dateStart = new Date(`${scheduled.dateOnly}T00:00:00.000${targetOffset}`);
       const dateEnd = new Date(`${scheduled.dateOnly}T23:59:59.999${targetOffset}`);
 
@@ -305,10 +313,10 @@ async function createOrder(req, res, next) {
           $gte: dateStart,
           $lte: dateEnd
         }
-      });
+      }).session(session);
 
       if (existingOrder) {
-        if (lockedUserVoucher) await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { status: 'active', usageDate: null });
+        await session.abortTransaction();
         return res.status(400).json({
           message: 'Mitra sudah penuh/memiliki jadwal lain pada tanggal tersebut. Silakan pilih tanggal lain.'
         });
@@ -319,6 +327,7 @@ async function createOrder(req, res, next) {
     const order = new Order({ 
       userId, 
       providerId: orderType === 'direct' ? providerId : null,
+      providerSnapshot, // [FIX POINT 6] Save Snapshot
       items: validatedItems,          
       
       totalAmount: Math.floor(finalTotalAmount),
@@ -337,35 +346,35 @@ async function createOrder(req, res, next) {
       attachments: attachments || []
     });
     
-    try {
-      await order.save();
-      
-      // Update Order ID di Voucher jika berhasil save
-      if (lockedUserVoucher) {
-        await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { orderId: order._id });
-      }
-
-      res.status(201).json({ 
-        message: 'Pesanan berhasil dibuat', 
-        data: {
-          ...order.toObject(),
-          orderNumber: order.orderNumber
-        }
-      });
-
-    } catch (saveError) {
-      // [ROLLBACK] Jika save order gagal, kembalikan status voucher jadi active
-      if (lockedUserVoucher) {
-        await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { 
-          status: 'active', 
-          usageDate: null 
-        });
-      }
-      throw saveError;
+    // Save Order with Session
+    await order.save({ session });
+    
+    // Update Order ID di Voucher dengan Session
+    if (lockedUserVoucher) {
+      await UserVoucher.findByIdAndUpdate(
+        lockedUserVoucher._id, 
+        { orderId: order._id }, 
+        { session }
+      );
     }
 
+    // Commit Transaction (Semua perubahan DB disimpan permanent)
+    await session.commitTransaction();
+
+    res.status(201).json({ 
+      message: 'Pesanan berhasil dibuat', 
+      data: {
+        ...order.toObject(),
+        orderNumber: order.orderNumber
+      }
+    });
+
   } catch (error) {
+    // [FIX POINT 4] Rollback Transaction jika terjadi error apa saja
+    await session.abortTransaction();
     next(error);
+  } finally {
+    session.endSession();
   }
 }
 
