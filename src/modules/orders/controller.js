@@ -43,6 +43,16 @@ function getLocalDateComponents(dateInput, timeZone = DEFAULT_TIMEZONE) {
   }
 }
 
+// [NEW HELPER] Cek apakah provider punya order yang sedang berjalan
+async function getProviderActiveOrderCount(providerId) {
+  const activeStatuses = ['accepted', 'on_the_way', 'working'];
+  const count = await Order.countDocuments({
+    providerId: providerId,
+    status: { $in: activeStatuses }
+  });
+  return count;
+}
+
 // 1.LIST ALL ORDERS
 async function listOrders(req, res, next) {
   try {
@@ -60,7 +70,7 @@ async function listOrders(req, res, next) {
       }
     } 
     
-    if (roles.includes('admin') && !  view) {
+    if (roles.includes('admin') && !   view) {
       filter = {}; 
     }
 
@@ -77,7 +87,7 @@ async function listOrders(req, res, next) {
       .lean();
 
     const messageKey = 'orders.list';
-    res.json({ messageKey, message: req.t ?   req.t(messageKey) : 'List Orders', data: orders });
+    res.json({ messageKey, message: req.t ?    req.t(messageKey) : 'List Orders', data: orders });
   } catch (error) {
     next(error);
   }
@@ -90,7 +100,7 @@ async function createOrder(req, res, next) {
 
   try {
     const userId = req.user?.userId;
-    if (! userId) {
+    if (!  userId) {
       await session.abortTransaction();
       return res.status(401).json({ message: 'Unauthorized' });
     }
@@ -120,7 +130,7 @@ async function createOrder(req, res, next) {
     let providerSnapshot = {};
 
     if (orderType === 'direct') {
-      if (! providerId) {
+      if (!  providerId) {
         await session.abortTransaction();
         return res.status(400).json({ message: 'Provider ID wajib untuk Direct Order' });
       }
@@ -172,7 +182,7 @@ async function createOrder(req, res, next) {
           ps => ps.serviceId && ps.serviceId.toString() === item.serviceId.toString() && ps.isActive
         );
 
-        if (! providerService) {
+        if (!  providerService) {
           await session.abortTransaction();
           return res.status(400).json({ 
             message: `Mitra ini tidak menyediakan layanan "${serviceDoc.name}".` 
@@ -197,7 +207,7 @@ async function createOrder(req, res, next) {
     }
     
     const settings = await Settings.findOne({ key: 'global_config' }).session(session);
-    const adminFee = settings ?  settings.adminFee : 2500;
+    const adminFee = settings ?   settings.adminFee : 2500;
 
     // --- [FIXED] VOUCHER LOGIC WITH ATOMIC TRANSACTION ---
     let discountAmount = 0;
@@ -213,14 +223,14 @@ async function createOrder(req, res, next) {
         match: { code: voucherCode.toUpperCase() }
       }).session(session);
 
-      if (! userVoucher || !userVoucher.voucherId) {
+      if (!  userVoucher || ! userVoucher.voucherId) {
         await session.abortTransaction();
         return res.status(404).json({ message: 'Voucher tidak valid atau belum diklaim.' });
       }
 
       const voucher = userVoucher.voucherId;
       const now = new Date();
-      if (! voucher.isActive || new Date(voucher.expiryDate) < now) {
+      if (!  voucher.isActive || new Date(voucher.expiryDate) < now) {
         await session.abortTransaction();
         return res.status(400).json({ message: 'Voucher sudah kadaluarsa' });
       }
@@ -281,7 +291,7 @@ async function createOrder(req, res, next) {
         { new: true, session: session }
       );
 
-      if (! lockedUserVoucher) {
+      if (!  lockedUserVoucher) {
         await session.abortTransaction();
         return res.status(400).json({ message: 'Voucher gagal digunakan atau sudah terpakai.' });
       }
@@ -295,7 +305,7 @@ async function createOrder(req, res, next) {
       const targetOffset = providerData.timeZoneOffset || DEFAULT_OFFSET;
 
       const scheduled = getLocalDateComponents(scheduledAt, targetTimeZone);
-      if (!  scheduled) {
+      if (!   scheduled) {
         await session.abortTransaction();
         return res.status(400).json({ message: 'Format tanggal kunjungan tidak valid.' });
       }
@@ -417,7 +427,7 @@ async function getOrderById(req, res, next) {
   }
 }
 
-// 4.LIST INCOMING ORDERS
+// 4.LIST INCOMING ORDERS - [FIXED] CEK STATUS PROVIDER SEBELUM SHOW BASIC ORDERS
 async function listIncomingOrders(req, res, next) {
   try {
     const userId = req.user.userId;
@@ -431,13 +441,19 @@ async function listIncomingOrders(req, res, next) {
       .filter(s => s.isActive)
       .map(s => s.serviceId.toString());
     
+    // [FIXED] CEK APAKAH PROVIDER SUDAH PUNYA ORDER YANG SEDANG BERJALAN
+    const activeOrderCount = await getProviderActiveOrderCount(provider._id);
+    
     const orders = await Order.find({
       $or: [
+        // Basic order hanya ditampilkan jika provider TIDAK ADA yang lagi dikerjakan
         { 
           orderType: 'basic', 
           status: 'searching',
           providerId: null, 
-          'items.serviceId': { $in: myServiceIds } 
+          'items.serviceId': { $in: myServiceIds },
+          // Hanya tampilkan jika provider tidak punya order aktif
+          $expr: { $eq: [activeOrderCount, 0] }
         },
         { 
           providerId: provider._id,
@@ -450,30 +466,43 @@ async function listIncomingOrders(req, res, next) {
     .sort({ scheduledAt: 1 })
     .lean();
 
-    res.json({ message: 'Daftar order masuk berhasil diambil', data: orders });
+    // [NEW] Jika provider sudah punya order aktif, filter basic orders
+    let filteredOrders = orders;
+    if (activeOrderCount > 0) {
+      filteredOrders = orders.filter(o => o.orderType !== 'basic' || o.status === 'paid');
+    }
+
+    res.json({ 
+      message: 'Daftar order masuk berhasil diambil',
+      providerStatus: {
+        activeOrderCount: activeOrderCount,
+        isBusy: activeOrderCount > 0
+      },
+      data: filteredOrders 
+    });
   } catch (error) {
     next(error);
   }
 }
 
-// 5. ACCEPT ORDER
+// 5. ACCEPT ORDER - [FIXED] CEK APAKAH PROVIDER SUDAH PUNYA ORDER YANG SEDANG BERJALAN
 async function acceptOrder(req, res, next) {
   try {
     const { orderId } = req.params;
     const userId = req.user.userId;
 
     const provider = await Provider.findOne({ userId }).lean();
-    if (! provider) {
+    if (!  provider) {
       return res.status(403).json({ message: 'Akses ditolak.' });
     }
 
     const order = await Order.findById(orderId);
-    if (! order) {
+    if (!  order) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan.' });
     }
 
     const validStatuses = ['searching', 'paid'];
-    if (!validStatuses.includes(order.status)) {
+    if (! validStatuses.includes(order.status)) {
       return res.status(400).json({ 
         message: 'Pesanan ini sudah tidak tersedia, sudah diambil, atau belum dibayar.' 
       });
@@ -483,6 +512,18 @@ async function acceptOrder(req, res, next) {
       return res.status(400).json({ 
         message: 'Basic order harus dalam status "searching" untuk diterima.' 
       });
+    }
+
+    // [FIXED] CEK APAKAH PROVIDER SUDAH PUNYA ORDER YANG SEDANG BERJALAN
+    // Jika ini basic order dan provider sudah punya order aktif, tolak
+    if (order.orderType === 'basic') {
+      const activeOrderCount = await getProviderActiveOrderCount(provider._id);
+      if (activeOrderCount > 0) {
+        return res.status(400).json({ 
+          message: `Anda masih memiliki ${activeOrderCount} pesanan yang sedang dikerjakan.Selesaikan pesanan tersebut terlebih dahulu sebelum menerima pesanan baru.`,
+          activeOrderCount: activeOrderCount
+        });
+      }
     }
 
     if (order.orderType === 'direct') {
@@ -502,7 +543,7 @@ async function acceptOrder(req, res, next) {
     order.providerId = provider._id;
     await order.save();
 
-    res.json({ message: 'Pesanan berhasil diterima!  Segera hubungi pelanggan.', data: order });
+    res.json({ message: 'Pesanan berhasil diterima!   Segera hubungi pelanggan.', data: order });
   } catch (error) {
     next(error);
   }
@@ -555,7 +596,7 @@ async function updateOrderStatus(req, res, next) {
     }
 
     if (['on_the_way', 'working'].includes(status)) {
-      if (! isProvider) {
+      if (!  isProvider) {
         return res.status(403).json({ 
           message: 'Hanya mitra yang bisa update status ini.' 
         });
@@ -566,7 +607,7 @@ async function updateOrderStatus(req, res, next) {
         'working': ['on_the_way']
       };
       
-      if (!  statusFlow[status].includes(order.status)) {
+      if (!   statusFlow[status].includes(order.status)) {
         return res.status(400).json({ 
           message: `Tidak bisa mengubah status dari "${order.status}" ke "${status}".` 
         });
