@@ -87,48 +87,66 @@ async function claimVoucher(req, res, next) {
     const userId = req.user.userId;
     const { code } = req.body;
 
-    // A. Cek Master Voucher
-    const voucher = await Voucher.findOne({ 
+    // A. Cek Apakah User Sudah Klaim? (Cek di UserVoucher dulu agar hemat query)
+    // Kita perlu cari voucherId berdasarkan kode dulu sebenarnya, tapi karena UserVoucher
+    // menyimpan referensi ObjectId, kita harus cari Master Voucher dulu untuk dapat _id nya.
+    
+    // Cari Master Voucher yang cocok kodenya
+    const voucherCheck = await Voucher.findOne({ 
       code: code.toUpperCase(), 
       isActive: true 
     });
 
-    if (!voucher) {
+    if (!voucherCheck) {
       return res.status(404).json({ message: 'Voucher tidak ditemukan atau tidak aktif' });
     }
 
-    const now = new Date();
-    if (new Date(voucher.expiryDate) < now) {
-      return res.status(400).json({ message: 'Voucher sudah kadaluarsa' });
-    }
-
-    if (voucher.quota <= 0) {
-      return res.status(400).json({ message: 'Kuota voucher sudah habis' });
-    }
-
-    // B. Cek Apakah User Sudah Klaim?
+    // Cek kepemilikan duplikat
     const existingClaim = await UserVoucher.findOne({
       userId,
-      voucherId: voucher._id
+      voucherId: voucherCheck._id
     });
 
     if (existingClaim) {
       return res.status(400).json({ message: 'Anda sudah mengklaim voucher ini sebelumnya' });
     }
 
-    // C. Proses Klaim (Simpan ke UserVoucher & Kurangi Quota)
-    // Idealnya menggunakan Transaction jika pakai MongoDB Replica Set.
-    // Untuk simplifikasi, kita pakai sequential await.
-    
-    await UserVoucher.create({
-      userId,
-      voucherId: voucher._id,
-      status: 'active'
-    });
+    // B. Cek Expiry Date
+    const now = new Date();
+    if (new Date(voucherCheck.expiryDate) < now) {
+      return res.status(400).json({ message: 'Voucher sudah kadaluarsa' });
+    }
 
-    // Kurangi kuota global
-    voucher.quota -= 1;
-    await voucher.save();
+    // C. [FIXED] ATOMIC UPDATE QUOTA (Mencegah Race Condition)
+    // Gunakan findOneAndUpdate dengan kondisi quota > 0
+    // Ini memastikan jika 2 user klaim sisa 1 kuota bersamaan, hanya 1 yang berhasil.
+    const voucher = await Voucher.findOneAndUpdate(
+      { 
+        _id: voucherCheck._id, 
+        quota: { $gt: 0 } // Syarat: Quota harus > 0
+      },
+      { 
+        $inc: { quota: -1 } // Kurangi 1
+      },
+      { new: true }
+    );
+
+    if (!voucher) {
+      return res.status(400).json({ message: 'Kuota voucher sudah habis' });
+    }
+
+    // D. Simpan ke UserVoucher
+    try {
+      await UserVoucher.create({
+        userId,
+        voucherId: voucher._id,
+        status: 'active'
+      });
+    } catch (createError) {
+      // Rollback quota jika gagal create UserVoucher (misal karena constraint unique lolos pengecekan awal)
+      await Voucher.findByIdAndUpdate(voucher._id, { $inc: { quota: 1 } });
+      throw createError;
+    }
 
     res.status(201).json({ 
       message: 'Voucher berhasil diklaim!',
@@ -139,32 +157,34 @@ async function claimVoucher(req, res, next) {
     });
 
   } catch (error) {
+    // Handle duplicate key error mongodb (E11000)
+    if (error.code === 11000) {
+       return res.status(400).json({ message: 'Anda sudah mengklaim voucher ini.' });
+    }
     next(error);
   }
 }
 
-// 4. CHECK VOUCHER (LOGIKA BARU DENGAN LAYANAN SPESIFIK)
+// 4. CHECK VOUCHER (LOGIKA BARU DENGAN LAYANAN SPESIFIK & SECURITY FIX)
 async function checkVoucher(req, res, next) {
   try {
     const userId = req.user.userId;
     const { code, items = [] } = req.body; 
-    // items expected format: [{ serviceId, price, quantity }, ...]
-    
+    // items format: [{ serviceId, quantity }, ...] -> Price dari client kita ABAIKAN demi keamanan
+
     if (!code) {
       return res.status(400).json({ message: 'Kode voucher wajib diisi' });
     }
 
     // A. Validasi Kepemilikan (Cek di UserVoucher)
-    // Kita cari UserVoucher yang join ke Voucher master untuk cek kode
     const userVoucher = await UserVoucher.findOne({ 
       userId,
       status: 'active'
     }).populate({
       path: 'voucherId',
-      match: { code: code.toUpperCase() } // Filter populate hanya yang kodenya cocok
+      match: { code: code.toUpperCase() } 
     });
 
-    // Jika userVoucher null ATAU voucherId null (artinya punya userVoucher tapi kodenya beda)
     if (!userVoucher || !userVoucher.voucherId) {
       return res.status(404).json({ message: 'Voucher tidak valid atau belum diklaim.' });
     }
@@ -177,25 +197,31 @@ async function checkVoucher(req, res, next) {
       return res.status(400).json({ message: 'Voucher sudah kadaluarsa atau dinonaktifkan' });
     }
 
-    // C. Validasi Layanan Spesifik & Hitung Eligible Amount
+    // C. [FIXED] FETCH HARGA ASLI DARI DB & HITUNG ELIGIBLE AMOUNT
+    // Kita tidak mempercayai harga dari req.body
     let eligibleTotal = 0;
     const applicableServiceIds = voucher.applicableServices.map(id => id.toString());
     const isGlobalVoucher = applicableServiceIds.length === 0;
 
-    // Hitung total belanja dari item yang VALID saja
-    items.forEach(item => {
-      const itemTotal = (Number(item.price) || 0) * (Number(item.quantity) || 1);
+    // Loop items dari request, tapi ambil harga dari DB
+    for (const item of items) {
+      if (!item.serviceId) continue;
       
+      const service = await Service.findById(item.serviceId).select('price basePrice');
+      if (!service) continue;
+
+      const realPrice = service.price || service.basePrice || 0;
+      const quantity = Number(item.quantity) || 1;
+      const itemTotal = realPrice * quantity;
+
       if (isGlobalVoucher) {
-        // Jika voucher global, semua item dihitung
         eligibleTotal += itemTotal;
       } else {
-        // Jika voucher spesifik, cek apakah serviceId item ada di daftar applicable
-        if (applicableServiceIds.includes(item.serviceId)) {
+        if (applicableServiceIds.includes(item.serviceId.toString())) {
           eligibleTotal += itemTotal;
         }
       }
-    });
+    }
 
     // Jika tidak ada item yang cocok sama sekali
     if (eligibleTotal === 0 && items.length > 0) {
@@ -232,12 +258,12 @@ async function checkVoucher(req, res, next) {
       message: 'Voucher valid', 
       data: {
         _id: voucher._id,
-        userVoucherId: userVoucher._id, // Penting untuk update status nanti
+        userVoucherId: userVoucher._id, 
         code: voucher.code,
         discountType: voucher.discountType,
         discountValue: voucher.discountValue,
         estimatedDiscount: Math.floor(discount),
-        eligibleTotal: eligibleTotal // Info tambahan debug
+        eligibleTotal: eligibleTotal 
       }
     });
 

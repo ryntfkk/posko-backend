@@ -4,6 +4,7 @@ const Provider = require('../providers/model');
 const Service = require('../services/model');
 const Settings = require('../settings/model');
 const Voucher = require('../vouchers/model');
+const UserVoucher = require('../vouchers/userVoucherModel');
 
 // [CONFIG] Default Timezone Configuration
 const DEFAULT_TIMEZONE = 'Asia/Jakarta';
@@ -138,57 +139,87 @@ async function createOrder(req, res, next) {
     
     // --- [UPDATED] FETCH ADMIN FEE DARI DB ---
     const settings = await Settings.findOne({ key: 'global_config' });
-    const adminFee = settings ? settings.adminFee : 0;
+    // Gunakan 2500 sebagai default jika settings belum diinisialisasi untuk mencegah fee 0
+    const adminFee = settings ? settings.adminFee : 2500;
 
-    // --- [UPDATED] VOUCHER LOGIC ---
+    // --- [FIXED] VOUCHER LOGIC ---
     let discountAmount = 0;
     let voucherId = null;
+    let userVoucherIdToUpdate = null; // ID UserVoucher untuk di-update statusnya nanti
 
     if (voucherCode) {
-      const voucher = await Voucher.findOne({ 
-        code: voucherCode.toUpperCase(), 
-        isActive: true 
+      // 1. Cek kepemilikan voucher di UserVoucher (Wajib Klaim Dulu)
+      const userVoucher = await UserVoucher.findOne({ 
+        userId,
+        status: 'active'
+      }).populate({
+        path: 'voucherId',
+        match: { code: voucherCode.toUpperCase() }
       });
 
-      if (!voucher) {
-        return res.status(404).json({ message: 'Voucher tidak ditemukan atau tidak aktif' });
+      // Jika tidak ditemukan atau voucherId null (karena match gagal)
+      if (!userVoucher || !userVoucher.voucherId) {
+        return res.status(404).json({ message: 'Voucher tidak valid atau belum diklaim.' });
       }
 
-      // Validasi Voucher
+      const voucher = userVoucher.voucherId;
+
+      // 2. Validasi Master Voucher (Aktif & Expiry)
       const now = new Date();
-      if (new Date(voucher.expiryDate) < now) {
+      if (!voucher.isActive || new Date(voucher.expiryDate) < now) {
         return res.status(400).json({ message: 'Voucher sudah kadaluarsa' });
       }
 
-      if (voucher.quota <= 0) {
-        return res.status(400).json({ message: 'Kuota voucher sudah habis' });
-      }
+      // 3. Hitung Eligible Total (Hanya item yang sesuai dengan Applicable Services)
+      let eligibleForDiscountTotal = 0;
+      const applicableServiceIds = voucher.applicableServices.map(id => id.toString());
+      const isGlobalVoucher = applicableServiceIds.length === 0;
 
-      if (servicesSubtotal < voucher.minPurchase) {
+      validatedItems.forEach(item => {
+        const itemTotal = item.price * item.quantity;
+        
+        if (isGlobalVoucher) {
+          // Jika voucher global, semua layanan dihitung
+          eligibleForDiscountTotal += itemTotal;
+        } else {
+          // Jika voucher spesifik, cek apakah serviceId item ini termasuk
+          if (applicableServiceIds.includes(item.serviceId.toString())) {
+            eligibleForDiscountTotal += itemTotal;
+          }
+        }
+      });
+
+      // 4. Validasi Min Purchase (Berdasarkan Eligible Total)
+      if (eligibleForDiscountTotal === 0) {
         return res.status(400).json({ 
-          message: `Minimal pembelian untuk voucher ini adalah Rp ${voucher.minPurchase.toLocaleString()}` 
+          message: 'Voucher ini tidak berlaku untuk layanan yang Anda pilih.' 
         });
       }
 
-      // Hitung Diskon
+      if (eligibleForDiscountTotal < voucher.minPurchase) {
+        return res.status(400).json({ 
+          message: `Minimal pembelian layanan yang valid untuk voucher ini adalah Rp ${voucher.minPurchase.toLocaleString()}` 
+        });
+      }
+
+      // 5. Hitung Diskon
       if (voucher.discountType === 'percentage') {
-        discountAmount = (servicesSubtotal * voucher.discountValue) / 100;
+        discountAmount = (eligibleForDiscountTotal * voucher.discountValue) / 100;
         if (voucher.maxDiscount > 0 && discountAmount > voucher.maxDiscount) {
           discountAmount = voucher.maxDiscount;
         }
       } else {
+        // Fixed Amount
         discountAmount = voucher.discountValue;
       }
 
-      // Pastikan diskon tidak minus atau melebihi subtotal
-      if (discountAmount > servicesSubtotal) {
-        discountAmount = servicesSubtotal;
+      // Cap diskon tidak boleh melebihi total yang eligible
+      if (discountAmount > eligibleForDiscountTotal) {
+        discountAmount = eligibleForDiscountTotal;
       }
 
       voucherId = voucher._id;
-
-      // Kurangi kuota voucher (Opsional: bisa dipindah saat pembayaran sukses)
-      await Voucher.findByIdAndUpdate(voucher._id, { $inc: { quota: -1 } });
+      userVoucherIdToUpdate = userVoucher._id;
     }
 
     // --- [UPDATED] FINAL TOTAL CALCULATION ---
@@ -281,6 +312,17 @@ async function createOrder(req, res, next) {
     });
     
     await order.save();
+
+    // [FIXED] UPDATE STATUS VOUCHER SETELAH ORDER BERHASIL DISIMPAN
+    if (userVoucherIdToUpdate) {
+      await UserVoucher.findByIdAndUpdate(userVoucherIdToUpdate, {
+        status: 'used',
+        usageDate: new Date(),
+        orderId: order._id
+      });
+      // Note: Kita TIDAK mengurangi quota master lagi disini, 
+      // karena quota master sudah dikurangi saat User melakukan CLAIM.
+    }
     
     res.status(201).json({ 
       message: 'Pesanan berhasil dibuat', 
