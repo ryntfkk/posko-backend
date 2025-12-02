@@ -20,6 +20,7 @@ const paymentRoutes = require('./modules/payments/routes');
 const chatRoutes = require('./modules/chat/routes');
 const settingsRoutes = require('./modules/settings/routes');
 const voucherRoutes = require('./modules/vouchers/routes');
+const earningsRoutes = require('./modules/earnings/routes'); // [BARU] Import route earnings
 const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
@@ -77,6 +78,7 @@ app.use('/api/reviews', requireDbConnection, reviewRoutes);
 app.use('/api/services', requireDbConnection, serviceRoutes);
 app.use('/api/settings', requireDbConnection, settingsRoutes);
 app.use('/api/vouchers', requireDbConnection, voucherRoutes);
+app.use('/api/earnings', requireDbConnection, earningsRoutes); // [BARU] Daftarkan endpoint earnings
 
 app.use(errorHandler);
 
