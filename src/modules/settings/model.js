@@ -11,6 +11,12 @@ const settingsSchema = new mongoose.Schema({
     type: Number, 
     default: 0 
   },
+  platformCommissionPercent: {
+    type: Number,
+    default: 12,
+    min: [0, 'Komisi platform tidak boleh negatif'],
+    max: [100, 'Komisi platform tidak boleh lebih dari 100%']
+  },
   currency: { 
     type: String, 
     default: 'IDR' 

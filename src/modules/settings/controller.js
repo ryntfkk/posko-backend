@@ -1,6 +1,6 @@
 const Settings = require('./model');
 
-// Mengambil konfigurasi global (termasuk admin fee)
+// Mengambil konfigurasi global (termasuk admin fee dan komisi platform)
 async function getGlobalConfig(req, res, next) {
   try {
     // [FIXED] Gunakan Atomic Upsert untuk mencegah Race Condition saat inisialisasi awal
@@ -11,6 +11,7 @@ async function getGlobalConfig(req, res, next) {
         $setOnInsert: { 
           key: 'global_config', 
           adminFee: 2500,
+          platformCommissionPercent: 12,
           isActive: true
         } 
       },
@@ -33,20 +34,31 @@ async function getGlobalConfig(req, res, next) {
 // Update konfigurasi (untuk Admin)
 async function updateGlobalConfig(req, res, next) {
   try {
-    const { adminFee, isActive } = req.body;
+    const { adminFee, platformCommissionPercent, isActive } = req.body;
     
     // [FIXED] Validasi Input Dasar
     if (adminFee !== undefined && adminFee < 0) {
       return res.status(400).json({ message: 'Biaya admin tidak boleh negatif.' });
     }
+
+    if (platformCommissionPercent !== undefined) {
+      if (platformCommissionPercent < 0 || platformCommissionPercent > 100) {
+        return res.status(400).json({ message: 'Komisi platform harus antara 0-100%.' });
+      }
+    }
     
+    const updateData = {};
+    if (adminFee !== undefined) updateData.adminFee = adminFee;
+    if (platformCommissionPercent !== undefined) updateData.platformCommissionPercent = platformCommissionPercent;
+    if (isActive !== undefined) updateData.isActive = isActive;
+
     const config = await Settings.findOneAndUpdate(
       { key: 'global_config' },
-      { adminFee, isActive },
-      { new: true, upsert: true } // Upsert true untuk jaga-jaga
+      updateData,
+      { new: true, upsert: true }
     );
     
-    res.json({ 
+    res. json({ 
       message: 'Settings updated successfully', 
       data: config 
     });
