@@ -339,6 +339,49 @@ async function getProfile(req, res, next) {
 }
 
 // ===================
+// UPDATE PROFILE
+// ===================
+async function updateProfile(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const updates = { ...req.body };
+
+    // [FIX] Handling Upload File jika ada
+    // Middleware Multer di routes akan menaruh file di req.file
+    if (req.file) {
+      // Simpan URL gambar relatif atau absolut sesuai konfigurasi static file
+      // Contoh: /uploads/profile-picture-123.jpg
+      updates.profilePictureUrl = `/uploads/${req.file.filename}`;
+    }
+
+    // [SECURITY] Filter field yang boleh diupdate
+    // Kita hapus field sensitif jika user mencoba mengirimnya
+    const forbiddenFields = ['password', 'balance', 'roles', 'activeRole', 'email', 'status', 'refreshTokens'];
+    forbiddenFields.forEach(field => delete updates[field]);
+
+    // Update data di database
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { $set: updates },
+      { new: true, runValidators: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({ message: 'User tidak ditemukan' });
+    }
+
+    res.json({
+      message: 'Profil berhasil diperbarui',
+      data: {
+        profile: sanitizeUser(user)
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// ===================
 // SWITCH ROLE
 // ===================
 async function switchRole(req, res, next) {
@@ -436,7 +479,8 @@ module.exports = {
   login, 
   refreshToken, 
   logout,
-  getProfile, 
+  getProfile,
+  updateProfile, // Export fungsi baru
   switchRole,
   registerPartner
 };

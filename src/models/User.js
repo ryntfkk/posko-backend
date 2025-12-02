@@ -49,6 +49,11 @@ const userSchema = new mongoose.Schema({
       default: '',
       trim: true,
     },
+    village: { // Tambahan untuk kelurahan jika diperlukan sesuai frontend
+      type: String,
+      default: '',
+      trim: true,
+    },
   },
   location: {
     type: {
@@ -101,6 +106,11 @@ const userSchema = new mongoose.Schema({
       validator: (value) => !value || value <= new Date(),
       message: 'Tanggal lahir tidak boleh di masa depan',
     },
+  },
+  gender: {
+    type: String,
+    enum: ['Laki-laki', 'Perempuan', ''], 
+    default: '',
   },
   phoneNumber: {
     type: String,
