@@ -61,12 +61,17 @@ function getCorsOrigins() {
     if (!origins.includes('http://localhost:3001')) origins.push('http://localhost:3001');
     if (!origins.includes('http://localhost:3002')) origins.push('http://localhost:3002');
 
-    // [FIXED] Tambahkan IP Network Lokal untuk testing dari Device/HP
-    // Ganti IP ini jika IP laptop Anda berubah
-    const localNetworkOrigin = 'http://192.168.0.172:3000'; 
-    if (!origins.includes(localNetworkOrigin)) {
-      origins.push(localNetworkOrigin);
-    }
+    // [UPDATED] IP Network Lokal Anda (PC)
+    // Ini mengizinkan akses dari HP ke Frontend di port 3000, 3001, dan 3002
+    const myIp = 'http://192.168.0.172';
+    
+    const localPorts = [3000, 3001, 3002];
+    localPorts.forEach(port => {
+      const origin = `${myIp}:${port}`;
+      if (!origins.includes(origin)) {
+        origins.push(origin);
+      }
+    });
   }
   
   return origins;
