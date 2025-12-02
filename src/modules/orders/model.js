@@ -34,8 +34,8 @@ const orderSchema = new mongoose.Schema(
     // [BARU] Order Number - Human Readable (CRITICAL)
     orderNumber: {
       type: String,
-      unique: true,
-      index: true
+      unique: true
+      // [FIXED] 'index: true' dihapus karena 'unique: true' sudah otomatis membuat index
     },
     
     userId: {
@@ -188,7 +188,7 @@ orderSchema.pre('save', async function(next) {
 orderSchema.index({ status: 1, orderType: 1, providerId: 1 });
 orderSchema.index({ 'items.serviceId': 1 });
 orderSchema.index({ location: '2dsphere' });
-orderSchema.index({ orderNumber: 1 });
+// [FIXED] Menghapus duplicate index untuk orderNumber
 orderSchema.index({ 'customerContact.phone': 1 });
 
 const Order = mongoose.model('Order', orderSchema);

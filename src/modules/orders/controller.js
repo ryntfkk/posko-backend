@@ -105,25 +105,31 @@ async function createOrder(req, res, next) {
       voucherCode // [BARU] Menerima kode voucher dari frontend
     } = req.body;
 
-    // --- SECURITY CHECK: CALCULATE PRICE FROM DB ---
-    let servicesSubtotal = 0;
-    const validatedItems = [];
-
     if (items.length === 0) {
       return res.status(400).json({ message: 'Items tidak boleh kosong' });
     }
 
-    // Loop through items dan ambil harga asli dari DB
+    // --- [OPTIMIZED] FETCH SERVICES SEKALI JALAN (Mencegah N+1 Query) ---
+    const serviceIds = items.map(item => item.serviceId).filter(Boolean);
+    const foundServices = await Service.find({ _id: { $in: serviceIds } });
+    
+    // Buat Map untuk akses cepat: ID -> Service Object
+    const serviceMap = new Map(foundServices.map(s => [s._id.toString(), s]));
+
+    let servicesSubtotal = 0;
+    const validatedItems = [];
+
+    // Loop items dari request dan ambil data dari Map
     for (const item of items) {
       if (!item.serviceId) continue;
 
-      const serviceDoc = await Service.findById(item.serviceId);
+      const serviceDoc = serviceMap.get(item.serviceId.toString());
       if (!serviceDoc) {
         return res.status(400).json({ message: `Service ID ${item.serviceId} tidak ditemukan.` });
       }
 
       const quantity = parseInt(item.quantity) || 1;
-      const realPrice = serviceDoc.price || serviceDoc.basePrice; // Fallback ke basePrice jika price undefined
+      const realPrice = serviceDoc.price || serviceDoc.basePrice; // Fallback ke basePrice
       const subTotal = realPrice * quantity;
 
       servicesSubtotal += subTotal;
@@ -139,13 +145,13 @@ async function createOrder(req, res, next) {
     
     // --- [UPDATED] FETCH ADMIN FEE DARI DB ---
     const settings = await Settings.findOne({ key: 'global_config' });
-    // Gunakan 2500 sebagai default jika settings belum diinisialisasi untuk mencegah fee 0
+    // Gunakan 2500 sebagai default jika settings belum diinisialisasi
     const adminFee = settings ? settings.adminFee : 2500;
 
-    // --- [FIXED] VOUCHER LOGIC ---
+    // --- [FIXED] VOUCHER LOGIC WITH LOCKING ---
     let discountAmount = 0;
     let voucherId = null;
-    let userVoucherIdToUpdate = null; // ID UserVoucher untuk di-update statusnya nanti
+    let lockedUserVoucher = null; // Menyimpan instance voucher yang sudah di-lock statusnya
 
     if (voucherCode) {
       // 1. Cek kepemilikan voucher di UserVoucher (Wajib Klaim Dulu)
@@ -170,26 +176,23 @@ async function createOrder(req, res, next) {
         return res.status(400).json({ message: 'Voucher sudah kadaluarsa' });
       }
 
-      // 3. Hitung Eligible Total (Hanya item yang sesuai dengan Applicable Services)
+      // 3. Hitung Eligible Total
       let eligibleForDiscountTotal = 0;
       const applicableServiceIds = voucher.applicableServices.map(id => id.toString());
       const isGlobalVoucher = applicableServiceIds.length === 0;
 
       validatedItems.forEach(item => {
         const itemTotal = item.price * item.quantity;
-        
         if (isGlobalVoucher) {
-          // Jika voucher global, semua layanan dihitung
           eligibleForDiscountTotal += itemTotal;
         } else {
-          // Jika voucher spesifik, cek apakah serviceId item ini termasuk
           if (applicableServiceIds.includes(item.serviceId.toString())) {
             eligibleForDiscountTotal += itemTotal;
           }
         }
       });
 
-      // 4. Validasi Min Purchase (Berdasarkan Eligible Total)
+      // 4. Validasi Min Purchase
       if (eligibleForDiscountTotal === 0) {
         return res.status(400).json({ 
           message: 'Voucher ini tidak berlaku untuk layanan yang Anda pilih.' 
@@ -219,23 +222,43 @@ async function createOrder(req, res, next) {
       }
 
       voucherId = voucher._id;
-      userVoucherIdToUpdate = userVoucher._id;
+
+      // 6. [CRITICAL] LOCK VOUCHER (Optimistic Locking)
+      // Ubah status jadi 'used' SEBELUM simpan order.
+      // Ini mencegah user memakai voucher yang sama di request concurrent.
+      lockedUserVoucher = await UserVoucher.findOneAndUpdate(
+        { 
+          _id: userVoucher._id, 
+          status: 'active' 
+        },
+        { 
+          status: 'used',
+          usageDate: new Date()
+        },
+        { new: true }
+      );
+
+      if (!lockedUserVoucher) {
+        return res.status(400).json({ message: 'Voucher gagal digunakan atau sudah terpakai.' });
+      }
     }
 
     // --- [UPDATED] FINAL TOTAL CALCULATION ---
-    // Total = Jasa + Admin - Diskon
     const finalTotalAmount = servicesSubtotal + adminFee - discountAmount;
-
-    // ------------------------------------------------
 
     // --- VALIDASI JADWAL UNTUK DIRECT ORDER ---
     if (orderType === 'direct') {
       if (!providerId) {
+        // Jangan lupa Rollback voucher jika validasi gagal
+        if (lockedUserVoucher) {
+           await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { status: 'active', usageDate: null });
+        }
         return res.status(400).json({ message: 'Provider ID wajib untuk Direct Order' });
       }
 
       const provider = await Provider.findById(providerId).lean();
       if (! provider) {
+        if (lockedUserVoucher) await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { status: 'active', usageDate: null });
         return res.status(404).json({ message: 'Mitra tidak ditemukan atau tidak aktif.' });
       }
       
@@ -244,18 +267,19 @@ async function createOrder(req, res, next) {
 
       const scheduled = getLocalDateComponents(scheduledAt, targetTimeZone);
       if (! scheduled) {
+        if (lockedUserVoucher) await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { status: 'active', usageDate: null });
         return res.status(400).json({ message: 'Format tanggal kunjungan tidak valid.' });
       }
 
-      // Validasi 0: Pastikan pesanan tidak Backdated (Masa Lalu)
+      // Validasi 0: Pastikan pesanan tidak Backdated
       const now = new Date();
-      // Beri toleransi 1 jam untuk proses booking
       const oneHourBefore = new Date(now.getTime() - 60 * 60 * 1000);
       if (scheduled.fullDate < oneHourBefore) {
+         if (lockedUserVoucher) await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { status: 'active', usageDate: null });
          return res.status(400).json({ message: 'Tanggal kunjungan tidak boleh di masa lalu.' });
       }
 
-      // Validasi 1: Cek apakah tanggal diblokir manual oleh Provider (Kalender Libur)
+      // Validasi 1: Cek Blokir Manual
       if (provider.blockedDates && provider.blockedDates.length > 0) {
         const isBlocked = provider.blockedDates.some(blockedDate => {
           const blocked = getLocalDateComponents(blockedDate, targetTimeZone);
@@ -263,13 +287,14 @@ async function createOrder(req, res, next) {
         });
         
         if (isBlocked) {
+          if (lockedUserVoucher) await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { status: 'active', usageDate: null });
           return res.status(400).json({
             message: 'Tanggal kunjungan ini diblokir manual oleh Mitra (Libur). Pilih tanggal lain.'
           });
         }
       }
 
-      // Validasi 2: Cek apakah tanggal sudah ada pesanan aktif (Double Booking Prevention)
+      // Validasi 2: Double Booking Check
       const dateStart = new Date(`${scheduled.dateOnly}T00:00:00.000${targetOffset}`);
       const dateEnd = new Date(`${scheduled.dateOnly}T23:59:59.999${targetOffset}`);
 
@@ -283,19 +308,20 @@ async function createOrder(req, res, next) {
       });
 
       if (existingOrder) {
+        if (lockedUserVoucher) await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { status: 'active', usageDate: null });
         return res.status(400).json({
           message: 'Mitra sudah penuh/memiliki jadwal lain pada tanggal tersebut. Silakan pilih tanggal lain.'
         });
       }
     }
 
+    // --- CREATE DB DOCUMENT ---
     const order = new Order({ 
       userId, 
       providerId: orderType === 'direct' ? providerId : null,
       items: validatedItems,          
       
-      // [UPDATED] Financial Fields
-      totalAmount: Math.floor(finalTotalAmount), // Bulatkan agar rapi
+      totalAmount: Math.floor(finalTotalAmount),
       adminFee: adminFee,
       discountAmount: Math.floor(discountAmount),
       voucherId: voucherId,
@@ -311,26 +337,33 @@ async function createOrder(req, res, next) {
       attachments: attachments || []
     });
     
-    await order.save();
-
-    // [FIXED] UPDATE STATUS VOUCHER SETELAH ORDER BERHASIL DISIMPAN
-    if (userVoucherIdToUpdate) {
-      await UserVoucher.findByIdAndUpdate(userVoucherIdToUpdate, {
-        status: 'used',
-        usageDate: new Date(),
-        orderId: order._id
-      });
-      // Note: Kita TIDAK mengurangi quota master lagi disini, 
-      // karena quota master sudah dikurangi saat User melakukan CLAIM.
-    }
-    
-    res.status(201).json({ 
-      message: 'Pesanan berhasil dibuat', 
-      data: {
-        ...order.toObject(),
-        orderNumber: order.orderNumber
+    try {
+      await order.save();
+      
+      // Update Order ID di Voucher jika berhasil save
+      if (lockedUserVoucher) {
+        await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { orderId: order._id });
       }
-    });
+
+      res.status(201).json({ 
+        message: 'Pesanan berhasil dibuat', 
+        data: {
+          ...order.toObject(),
+          orderNumber: order.orderNumber
+        }
+      });
+
+    } catch (saveError) {
+      // [ROLLBACK] Jika save order gagal, kembalikan status voucher jadi active
+      if (lockedUserVoucher) {
+        await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { 
+          status: 'active', 
+          usageDate: null 
+        });
+      }
+      throw saveError;
+    }
+
   } catch (error) {
     next(error);
   }

@@ -54,9 +54,19 @@ function getCorsOrigins() {
     origins.push(process.env.FRONTEND_ADMIN_URL.trim());
   }
   
-  // Development fallback
-  if (process.env.NODE_ENV === 'development' && origins.length === 0) {
-    origins.push('http://localhost:3000', 'http://localhost:3001', 'http://localhost:3002');
+  // Development fallback & Local IP Support
+  if (process.env.NODE_ENV === 'development') {
+    // Pastikan localhost ada
+    if (!origins.includes('http://localhost:3000')) origins.push('http://localhost:3000');
+    if (!origins.includes('http://localhost:3001')) origins.push('http://localhost:3001');
+    if (!origins.includes('http://localhost:3002')) origins.push('http://localhost:3002');
+
+    // [FIXED] Tambahkan IP Network Lokal untuk testing dari Device/HP
+    // Ganti IP ini jika IP laptop Anda berubah
+    const localNetworkOrigin = 'http://192.168.0.172:3000'; 
+    if (!origins.includes(localNetworkOrigin)) {
+      origins.push(localNetworkOrigin);
+    }
   }
   
   return origins;

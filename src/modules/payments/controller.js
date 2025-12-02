@@ -64,6 +64,52 @@ async function createPayment(req, res, next) {
     const midtransOrderId = `POSKO-${order._id}-${Date.now()}`;
     const currentBaseUrl = process.env.FRONTEND_CUSTOMER_URL || "http://localhost:3000";
     
+    // [FIX] Susun Item Details agar sesuai dengan Gross Amount (Total)
+    // Midtrans memvalidasi: Sum(item prices * quantity) === gross_amount
+    let calculatedGrossAmount = 0;
+    
+    // A. Item Utama (Jasa/Service)
+    const itemDetails = order.items.map(item => {
+      const itemTotal = item.price * item.quantity;
+      calculatedGrossAmount += itemTotal;
+      return {
+        id: item.serviceId.toString(),
+        price: item.price,
+        quantity: item.quantity,
+        name: item.name.substring(0, 50)
+      };
+    });
+
+    // B. Tambahkan Biaya Admin sebagai Item
+    if (order.adminFee && order.adminFee > 0) {
+      itemDetails.push({
+        id: 'ADMIN-FEE',
+        price: order.adminFee,
+        quantity: 1,
+        name: 'Biaya Layanan Aplikasi'
+      });
+      calculatedGrossAmount += order.adminFee;
+    }
+
+    // C. Tambahkan Diskon sebagai Item dengan harga negatif
+    if (order.discountAmount && order.discountAmount > 0) {
+      itemDetails.push({
+        id: 'VOUCHER-DISC',
+        price: -order.discountAmount, // Negatif agar mengurangi total
+        quantity: 1,
+        name: 'Diskon Voucher'
+      });
+      calculatedGrossAmount -= order.discountAmount;
+    }
+
+    // [SAFETY CHECK] Pastikan perhitungan JS sama dengan data di DB
+    // Jika berbeda 1-2 perak karena pembulatan, kita gunakan totalAmount DB sebagai acuan utama
+    // tapi tetap kirim item_details yang sudah kita susun.
+    // Peringatan: Jika selisihnya besar, transaksi Midtrans mungkin akan reject.
+    if (Math.abs(calculatedGrossAmount - order.totalAmount) > 5) {
+       console.warn(`⚠️ Mismatch Warning: Calculated Items (${calculatedGrossAmount}) vs Order Total (${order.totalAmount})`);
+    }
+
     const transactionDetails = {
       transaction_details: {
         order_id: midtransOrderId,
@@ -74,12 +120,7 @@ async function createPayment(req, res, next) {
         email: order.userId.email,
         phone: order.userId.phoneNumber || '',
       },
-      item_details: order.items.map(item => ({
-        id: item.serviceId.toString(),
-        price: item.price,
-        quantity: item.quantity,
-        name: item.name.substring(0, 50)
-      })),
+      item_details: itemDetails,
       callbacks: {
         finish: `${currentBaseUrl}/orders`,
         error: `${currentBaseUrl}/orders`,
