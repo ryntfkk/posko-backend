@@ -6,6 +6,8 @@ const Order = require('../orders/model');
 const snap = require('../../utils/midtrans');
 const { checkMidtransConfig } = require('../../utils/midtransConfig');
 const env = require('../../config/env');
+const UserVoucher = require('../vouchers/userVoucherModel'); // [NEW] Import UserVoucher
+const Voucher = require('../vouchers/model'); // [NEW] Import Voucher
 
 async function listPayments(req, res, next) {
   try {
@@ -26,7 +28,7 @@ async function listPayments(req, res, next) {
     const messageKey = 'payments.list';
     res.json({ 
       messageKey, 
-      message: req.t ?  req.t(messageKey) : 'Payment List', 
+      message: req.t ? req.t(messageKey) : 'Payment List', 
       data: userPayments 
     });
   } catch (error) {
@@ -231,22 +233,19 @@ async function handleNotification(req, res, next) {
     // 5. Update Database
     if (paymentStatus === 'paid') {
         // A. Update Payment Record
-        // Cari payment yang statusnya pending untuk order ini dengan nominal yang cocok
-        // (Mengantisipasi multiple payment untuk addon)
         await Payment.findOneAndUpdate(
             { 
                 orderId: realOrderId, 
                 status: 'pending',
-                amount: notifAmount // Match amount untuk membedakan initial vs addon jika perlu
+                amount: notifAmount 
             }, 
             { status: 'paid' }
         );
         
         // B. Update Order / Additional Fees
-        // Logika: Jika order masih pending -> ini pembayaran utama
         if (order.status === 'pending') {
              // Cek kesesuaian nominal utama
-             if (Math.abs(notifAmount - order.totalAmount) <= 500) { // Toleransi kecil
+             if (Math.abs(notifAmount - order.totalAmount) <= 500) { 
                  const nextStatus = order.orderType === 'direct' ? 'paid' : 'searching';
                  await Order.findByIdAndUpdate(realOrderId, { status: nextStatus });
                  console.log(`✅ Order ${realOrderId} updated to ${nextStatus}`);
@@ -254,15 +253,10 @@ async function handleNotification(req, res, next) {
                  console.warn(`⚠️ Payment amount ${notifAmount} does not match order total ${order.totalAmount}`);
              }
         } 
-        // Jika order sudah berjalan (working/on_the_way) -> ini kemungkinan pembayaran add-on
         else {
-             // Cari semua biaya tambahan yang statusnya 'pending_approval'
-             // Kita update statusnya menjadi 'paid' menggunakan manipulasi langsung pada document order
-             // agar atomic dan Mongoose mendeteksi perubahan subdocument dengan benar.
-             
+             // Pembayaran Add-on
              let updatedFees = false;
              
-             // Iterate langsung array di dalam document Mongoose
              if (order.additionalFees && order.additionalFees.length > 0) {
                  order.additionalFees.forEach(fee => {
                      if (fee.status === 'pending_approval') {
@@ -273,15 +267,44 @@ async function handleNotification(req, res, next) {
              }
 
              if (updatedFees) {
-                 await order.save(); // Simpan perubahan pada document utama
+                 await order.save(); 
                  console.log(`✅ Additional fees for order ${realOrderId} marked as paid`);
              }
         }
 
-    } else if (paymentStatus === 'failed') {
-        await Payment.findOneAndUpdate({ orderId: realOrderId, status: 'pending' }, { status: 'failed' });
+    } 
+    // [UPDATE] Handle Expire / Failed
+    else if (paymentStatus === 'failed') {
+        // Update Payment Record
+        await Payment.findOneAndUpdate(
+            { orderId: realOrderId, status: 'pending' }, 
+            { status: 'failed' }
+        );
+
+        // Jika order masih pending (belum diproses mitra), batalkan order
         if (order.status === 'pending') {
             await Order.findByIdAndUpdate(realOrderId, { status: 'cancelled' });
+            console.log(`❌ Order ${realOrderId} cancelled due to payment failure/expiry`);
+
+            // [NEW] Rollback Voucher if used
+            // Kita cari UserVoucher berdasarkan orderId yang baru saja dibatalkan
+            const userVoucher = await UserVoucher.findOne({ orderId: realOrderId });
+            
+            if (userVoucher) {
+                console.log(`↺ Rolling back voucher for order ${realOrderId}`);
+                
+                // 1. Reactivate User Voucher
+                userVoucher.status = 'active';
+                userVoucher.usageDate = null;
+                userVoucher.orderId = null; // Lepaskan dari order
+                await userVoucher.save();
+                
+                // 2. Increment Master Voucher Quota (Opsional, tapi adil)
+                // Jika order batal karena payment expire, kembalikan kuota ke master
+                if (order.voucherId) {
+                    await Voucher.findByIdAndUpdate(order.voucherId, { $inc: { quota: 1 } });
+                }
+            }
         }
     }
 

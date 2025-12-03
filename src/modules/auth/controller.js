@@ -74,7 +74,7 @@ function isDuplicateKeyError(error) {
 async function register(req, res, next) {
   try {
     const {
-      fullName, email, password, roles = ['customer'], activeRole,
+      fullName, email, password,
       address, location, profilePictureUrl, bannerPictureUrl,
       bio, birthDate, phoneNumber, balance, status,
     } = req.body;
@@ -89,12 +89,17 @@ async function register(req, res, next) {
       });
     }
 
+    // [PERBAIKAN] Force role selalu 'customer' untuk pendaftaran publik
+    // User tidak boleh mendaftar langsung sebagai provider lewat endpoint ini
+    const forcedRoles = ['customer'];
+    const forcedActiveRole = 'customer';
+
     const user = new User({
       fullName, 
       email, 
       password, 
-      roles,
-      activeRole: activeRole || roles?.[0],
+      roles: forcedRoles,
+      activeRole: forcedActiveRole,
       address, 
       location, 
       profilePictureUrl, 
@@ -480,7 +485,7 @@ module.exports = {
   refreshToken, 
   logout,
   getProfile,
-  updateProfile, // Export fungsi baru
+  updateProfile, 
   switchRole,
   registerPartner
 };

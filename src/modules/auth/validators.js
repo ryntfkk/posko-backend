@@ -5,8 +5,6 @@ const {
   normalizeEmail,
 } = require('../../utils/validation');
 
-const allowedRoles = ['customer', 'provider', 'admin'];
-
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const phoneRegex = /^\+?[0-9]{10,15}$/;
 
@@ -44,7 +42,7 @@ function validateCredentials(body, errors, { enforceStrength = true } = {}) {
   const password = normalizeString(body.password) || '';
   if (!password) {
     addError(errors, 'password', 'validation.password_required', 'Password wajib diisi');
-  } else if (enforceStrength && ! isStrongPassword(password)) {
+  } else if (enforceStrength && !isStrongPassword(password)) {
     // [IMPROVEMENT] Pesan error lebih spesifik
     const missing = getPasswordStrengthErrors(password);
     addError(
@@ -72,28 +70,9 @@ function validateRegister(req, res, next) {
   // Validasi credentials dengan strength check
   const credentials = validateCredentials(body, errors, { enforceStrength: true });
 
-  // Validasi roles
-  const rolesInput = body.roles ??  ['customer'];
-  const roles = (Array.isArray(rolesInput) ?  rolesInput : [rolesInput])
-    .map(normalizeString)
-    .filter(Boolean);
-  const sanitizedRoles = roles.length ?  roles : ['customer'];
-  const invalidRoles = sanitizedRoles.filter((role) => !allowedRoles.includes(role));
-  if (invalidRoles.length) {
-    addError(errors, 'roles', 'validation.role_invalid', 'Role tidak valid', {
-      roles: invalidRoles.join(', '),
-    });
-  }
-
-  const activeRole = normalizeString(body.activeRole);
-  if (activeRole && !sanitizedRoles.includes(activeRole)) {
-    addError(
-      errors,
-      'activeRole',
-      'validation.active_role_invalid',
-      'activeRole harus salah satu dari roles'
-    );
-  }
+  // [PERBAIKAN] Validasi roles dihapus dari sini.
+  // Registrasi publik (/register) akan selalu memaksa role menjadi 'customer' di controller.
+  // User tidak diizinkan memilih role saat register awal.
 
   // Validasi phone number
   const phoneNumber = normalizeString(body.phoneNumber) || '';
@@ -104,7 +83,7 @@ function validateRegister(req, res, next) {
   // Validasi coordinates
   const coordinates = body?.location?.coordinates;
   const hasCoordinates = Array.isArray(coordinates) && coordinates.length === 2;
-  const numericCoordinates = hasCoordinates ?  coordinates.map(Number) : [];
+  const numericCoordinates = hasCoordinates ? coordinates.map(Number) : [];
   const coordinatesAreValid = numericCoordinates.every(Number.isFinite);
 
   if (coordinates && !hasCoordinates) {
@@ -114,7 +93,7 @@ function validateRegister(req, res, next) {
       'validation.invalid_coordinates',
       'Lokasi harus berupa [longitude, latitude]'
     );
-  } else if (hasCoordinates && ! coordinatesAreValid) {
+  } else if (hasCoordinates && !coordinatesAreValid) {
     addError(
       errors,
       'location.coordinates',
@@ -144,8 +123,7 @@ function validateRegister(req, res, next) {
     fullName,
     email: credentials.email,
     password: credentials.password,
-    roles: sanitizedRoles,
-    activeRole: activeRole || sanitizedRoles[0],
+    // Role akan di-set manual di controller
     address: {
       province: normalizeString(body?.address?.province) || '',
       district: normalizeString(body?.address?.district) || '',
