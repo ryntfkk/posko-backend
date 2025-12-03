@@ -55,7 +55,7 @@ async function getProviderActiveOrderCount(providerId) {
   return count;
 }
 
-// 1.LIST ALL ORDERS
+// 1. LIST ALL ORDERS
 async function listOrders(req, res, next) {
   try {
     const { roles = [], userId } = req.user || {};
@@ -95,7 +95,7 @@ async function listOrders(req, res, next) {
   }
 }
 
-// 2.CREATE ORDER
+// 2. CREATE ORDER
 async function createOrder(req, res, next) {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -404,7 +404,7 @@ async function createOrder(req, res, next) {
   }
 }
 
-// 3.GET ORDER BY ID
+// 3. GET ORDER BY ID
 async function getOrderById(req, res, next) {
   try {
     const { orderId } = req.params;
@@ -429,7 +429,7 @@ async function getOrderById(req, res, next) {
   }
 }
 
-// 4.LIST INCOMING ORDERS - [FIXED] CEK STATUS PROVIDER SEBELUM SHOW BASIC ORDERS
+// 4. LIST INCOMING ORDERS - [FIXED] CEK STATUS PROVIDER SEBELUM SHOW BASIC ORDERS
 async function listIncomingOrders(req, res, next) {
   try {
     const userId = req.user.userId;
@@ -551,7 +551,7 @@ async function acceptOrder(req, res, next) {
   }
 }
 
-// 6.UPDATE ORDER STATUS
+// 6. UPDATE ORDER STATUS
 async function updateOrderStatus(req, res, next) {
   try {
     const { orderId } = req.params;
@@ -723,7 +723,7 @@ async function updateOrderStatus(req, res, next) {
   }
 }
 
-// 7. [BARU] REQUEST ADDITIONAL FEE
+// 7. REQUEST ADDITIONAL FEE
 async function requestAdditionalFee(req, res, next) {
   try {
     const { orderId } = req.params;
@@ -769,7 +769,7 @@ async function requestAdditionalFee(req, res, next) {
   }
 }
 
-// 8. [BARU] UPLOAD COMPLETION EVIDENCE
+// 8. UPLOAD COMPLETION EVIDENCE
 async function uploadCompletionEvidence(req, res, next) {
   try {
     const { orderId } = req.params;
@@ -816,6 +816,36 @@ async function uploadCompletionEvidence(req, res, next) {
   }
 }
 
+// 9. [BARU] REJECT ADDITIONAL FEE
+async function rejectAdditionalFee(req, res, next) {
+  try {
+    const { orderId, feeId } = req.params;
+    const userId = req.user.userId;
+
+    const order = await Order.findById(orderId);
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+
+    // Pastikan yang menolak adalah customer pemilik order
+    if (order.userId.toString() !== userId) {
+      return res.status(403).json({ message: 'Unauthorized' });
+    }
+
+    const fee = order.additionalFees.id(feeId);
+    if (!fee) return res.status(404).json({ message: 'Fee not found' });
+
+    if (fee.status !== 'pending_approval') {
+      return res.status(400).json({ message: 'Hanya biaya yang statusnya menunggu persetujuan yang bisa ditolak.' });
+    }
+
+    fee.status = 'rejected';
+    await order.save();
+
+    res.json({ message: 'Biaya tambahan berhasil ditolak.', data: order });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = { 
   listOrders, 
   createOrder, 
@@ -823,6 +853,7 @@ module.exports = {
   listIncomingOrders,
   acceptOrder,
   updateOrderStatus,
-  requestAdditionalFee, // [BARU]
-  uploadCompletionEvidence // [BARU]
+  requestAdditionalFee, 
+  uploadCompletionEvidence,
+  rejectAdditionalFee // [BARU]
 };

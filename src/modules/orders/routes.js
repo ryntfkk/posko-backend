@@ -46,6 +46,9 @@ router.patch('/:orderId/status', controller.updateOrderStatus);
 // [BARU] Endpoint Request Biaya Tambahan
 router.post('/:orderId/additional-fee', controller.requestAdditionalFee);
 
+// [BARU] Endpoint Reject Biaya Tambahan (Sesuai Frontend)
+router.put('/:orderId/fees/:feeId/reject', controller.rejectAdditionalFee);
+
 // [BARU] Endpoint Upload Bukti Pekerjaan
 router.post('/:orderId/completion-evidence', upload.single('image'), controller.uploadCompletionEvidence);
 

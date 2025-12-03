@@ -47,7 +47,7 @@ async function createPayment(req, res, next) {
     const { orderId } = req.body;
     const userId = req.user.userId;
 
-    // 1.Ambil Data Order
+    // 1. Ambil Data Order
     const order = await Order.findById(orderId).populate('userId');
     if (!order) {
       return res.status(404).json({ message: 'Order tidak ditemukan' });
@@ -60,57 +60,74 @@ async function createPayment(req, res, next) {
       });
     }
 
-    // 2.Buat Order ID unik untuk Midtrans
+    // 2. Tentukan Jenis Pembayaran (Order Utama atau Add-on)
+    let grossAmount = 0;
+    let itemDetails = [];
+    let paymentType = 'initial'; // 'initial' or 'addon'
+
+    // KONDISI 1: Pembayaran Awal (Order Utama)
+    if (order.status === 'pending') {
+        grossAmount = order.totalAmount;
+        
+        // Item Utama
+        itemDetails = order.items.map(item => ({
+            id: item.serviceId.toString(),
+            price: item.price,
+            quantity: item.quantity,
+            name: item.name.substring(0, 50)
+        }));
+
+        // Admin Fee
+        if (order.adminFee && order.adminFee > 0) {
+            itemDetails.push({
+                id: 'ADMIN-FEE',
+                price: order.adminFee,
+                quantity: 1,
+                name: 'Biaya Layanan Aplikasi'
+            });
+        }
+
+        // Diskon
+        if (order.discountAmount && order.discountAmount > 0) {
+            itemDetails.push({
+                id: 'VOUCHER-DISC',
+                price: -order.discountAmount,
+                quantity: 1,
+                name: 'Diskon Voucher'
+            });
+        }
+    } 
+    // KONDISI 2: Pembayaran Biaya Tambahan (Saat Working/On The Way)
+    else if (['working', 'on_the_way', 'accepted', 'waiting_approval'].includes(order.status)) {
+        // Cari biaya tambahan yang statusnya 'pending_approval' (belum dibayar customer)
+        const unpaidFees = order.additionalFees.filter(f => f.status === 'pending_approval');
+        
+        if (unpaidFees.length === 0) {
+            return res.status(400).json({ message: 'Tidak ada tagihan yang perlu dibayar saat ini.' });
+        }
+
+        paymentType = 'addon';
+        grossAmount = unpaidFees.reduce((acc, curr) => acc + curr.amount, 0);
+
+        itemDetails = unpaidFees.map(fee => ({
+            id: `ADDON-${fee._id}`,
+            price: fee.amount,
+            quantity: 1,
+            name: fee.description.substring(0, 50)
+        }));
+    } else {
+        return res.status(400).json({ message: 'Status pesanan tidak valid untuk pembayaran.' });
+    }
+
+    // 3. Buat Order ID unik untuk Midtrans
+    // Format: POSKO-[ORDER_ID]-[TIMESTAMP]
     const midtransOrderId = `POSKO-${order._id}-${Date.now()}`;
     const currentBaseUrl = process.env.FRONTEND_CUSTOMER_URL || "http://localhost:3000";
-    
-    // [FIX] Susun Item Details agar sesuai dengan Gross Amount (Total)
-    // Midtrans memvalidasi: Sum(item prices * quantity) === gross_amount
-    let calculatedGrossAmount = 0;
-    
-    // A. Item Utama (Jasa/Service)
-    const itemDetails = order.items.map(item => {
-      const itemTotal = item.price * item.quantity;
-      calculatedGrossAmount += itemTotal;
-      return {
-        id: item.serviceId.toString(),
-        price: item.price,
-        quantity: item.quantity,
-        name: item.name.substring(0, 50)
-      };
-    });
-
-    // B. Tambahkan Biaya Admin sebagai Item
-    if (order.adminFee && order.adminFee > 0) {
-      itemDetails.push({
-        id: 'ADMIN-FEE',
-        price: order.adminFee,
-        quantity: 1,
-        name: 'Biaya Layanan Aplikasi'
-      });
-      calculatedGrossAmount += order.adminFee;
-    }
-
-    // C. Tambahkan Diskon sebagai Item dengan harga negatif
-    if (order.discountAmount && order.discountAmount > 0) {
-      itemDetails.push({
-        id: 'VOUCHER-DISC',
-        price: -order.discountAmount, // Negatif agar mengurangi total
-        quantity: 1,
-        name: 'Diskon Voucher'
-      });
-      calculatedGrossAmount -= order.discountAmount;
-    }
-
-    // [SAFETY CHECK] Pastikan perhitungan JS sama dengan data di DB
-    if (Math.abs(calculatedGrossAmount - order.totalAmount) > 5) {
-       console.warn(`⚠️ Mismatch Warning: Calculated Items (${calculatedGrossAmount}) vs Order Total (${order.totalAmount})`);
-    }
 
     const transactionDetails = {
       transaction_details: {
         order_id: midtransOrderId,
-        gross_amount: order.totalAmount,
+        gross_amount: grossAmount,
       },
       customer_details: {
         first_name: order.userId.fullName,
@@ -119,9 +136,9 @@ async function createPayment(req, res, next) {
       },
       item_details: itemDetails,
       callbacks: {
-        finish: `${currentBaseUrl}/orders`,
-        error: `${currentBaseUrl}/orders`,
-        pending: `${currentBaseUrl}/orders`
+        finish: `${currentBaseUrl}/orders/${order._id}`,
+        error: `${currentBaseUrl}/orders/${order._id}`,
+        pending: `${currentBaseUrl}/orders/${order._id}`
       }
     };
 
@@ -129,9 +146,10 @@ async function createPayment(req, res, next) {
 
     const payment = new Payment({
       orderId: order._id,
-      amount: order.totalAmount,
+      amount: grossAmount,
       method: 'midtrans_snap',
       status: 'pending',
+      // Bisa tambahkan field meta/type jika schema mendukung, tapi sementara pakai logic status order
     });
     await payment.save();
 
@@ -140,7 +158,8 @@ async function createPayment(req, res, next) {
       data: {
         paymentId: payment._id,
         snapToken: transaction.token,
-        redirectUrl: transaction.redirect_url
+        redirectUrl: transaction.redirect_url,
+        paymentType
       }
     });
 
@@ -164,7 +183,6 @@ async function handleNotification(req, res, next) {
     }
 
     // 1. Validasi Signature
-    // Gunakan gross_amount mentah dari payload (string/number) persis seperti yang dikirim Midtrans
     const signatureInput = `${order_id}${status_code}${gross_amount}${serverKey}`;
     const expectedSignature = crypto.createHash('sha512').update(signatureInput).digest('hex');
 
@@ -186,23 +204,13 @@ async function handleNotification(req, res, next) {
         return res.status(200).json({ message: 'Invalid Order ID ignored' });
     }
 
-    // 3. [CRITICAL] Validasi Amount dengan Database
-    // Mencegah serangan manipulasi nominal (User bayar lebih murah dari seharusnya)
+    // 3. Validasi & Ambil Order
     const order = await Order.findById(realOrderId);
     if (!order) {
         return res.status(404).json({ message: 'Order not found in DB' });
     }
 
-    // Konversi gross_amount ke Number untuk perbandingan (Midtrans mungkin kirim string "10000.00")
     const notifAmount = parseFloat(gross_amount);
-    const dbAmount = order.totalAmount;
-
-    // Toleransi selisih kecil akibat floating point (opsional, set strict jika perlu)
-    if (Math.abs(notifAmount - dbAmount) > 5) { 
-        console.error(`🚨 Fraud Alert: Amount mismatch! Paid: ${notifAmount}, Bill: ${dbAmount}`);
-        // Jangan proses status order, kembalikan 200 agar Midtrans tidak retry (karena ini fraud/error permanen)
-        return res.status(200).json({ message: 'Amount mismatch ignored' });
-    }
 
     // 4. Tentukan Status Pembayaran
     let paymentStatus = 'pending';
@@ -218,20 +226,60 @@ async function handleNotification(req, res, next) {
         paymentStatus = 'failed';
     }
 
-    console.log(`🔔 Webhook: ${realOrderId} status ${paymentStatus} (${transactionStatus})`);
+    console.log(`🔔 Webhook: ${realOrderId} status ${paymentStatus} (${transactionStatus}) - Amount: ${notifAmount}`);
 
-    // 5. Update Database (Payment & Order)
+    // 5. Update Database
     if (paymentStatus === 'paid') {
-        await Payment.findOneAndUpdate({ orderId: realOrderId }, { status: 'paid' });
+        // A. Update Payment Record
+        // Cari payment yang statusnya pending untuk order ini dengan nominal yang cocok
+        // (Mengantisipasi multiple payment untuk addon)
+        await Payment.findOneAndUpdate(
+            { 
+                orderId: realOrderId, 
+                status: 'pending',
+                amount: notifAmount // Match amount untuk membedakan initial vs addon jika perlu
+            }, 
+            { status: 'paid' }
+        );
         
-        // Cek dulu agar tidak menimpa status jika sudah diproses lanjut
-        if (['pending', 'cancelled', 'failed'].includes(order.status)) {
-            const nextStatus = order.orderType === 'direct' ? 'paid' : 'searching';
-            await Order.findByIdAndUpdate(realOrderId, { status: nextStatus });
+        // B. Update Order / Additional Fees
+        // Logika: Jika order masih pending -> ini pembayaran utama
+        if (order.status === 'pending') {
+             // Cek kesesuaian nominal utama
+             if (Math.abs(notifAmount - order.totalAmount) <= 500) { // Toleransi kecil
+                 const nextStatus = order.orderType === 'direct' ? 'paid' : 'searching';
+                 await Order.findByIdAndUpdate(realOrderId, { status: nextStatus });
+                 console.log(`✅ Order ${realOrderId} updated to ${nextStatus}`);
+             } else {
+                 console.warn(`⚠️ Payment amount ${notifAmount} does not match order total ${order.totalAmount}`);
+             }
+        } 
+        // Jika order sudah berjalan (working/on_the_way) -> ini kemungkinan pembayaran add-on
+        else {
+             // Cari semua biaya tambahan yang statusnya 'pending_approval'
+             // Kita update statusnya menjadi 'paid'
+             // (Asumsi user membayar lunas tagihan add-on yang pending)
+             
+             let updatedFees = false;
+             const updatedAdditionalFees = order.additionalFees.map(fee => {
+                 if (fee.status === 'pending_approval') {
+                     updatedFees = true;
+                     return { ...fee, status: 'paid' };
+                 }
+                 return fee;
+             });
+
+             if (updatedFees) {
+                 await Order.findByIdAndUpdate(realOrderId, { additionalFees: updatedAdditionalFees });
+                 console.log(`✅ Additional fees for order ${realOrderId} marked as paid`);
+             }
         }
+
     } else if (paymentStatus === 'failed') {
-        await Payment.findOneAndUpdate({ orderId: realOrderId }, { status: 'failed' });
-        await Order.findByIdAndUpdate(realOrderId, { status: 'cancelled' });
+        await Payment.findOneAndUpdate({ orderId: realOrderId, status: 'pending' }, { status: 'failed' });
+        if (order.status === 'pending') {
+            await Order.findByIdAndUpdate(realOrderId, { status: 'cancelled' });
+        }
     }
 
     res.status(200).json({ message: 'OK' });
