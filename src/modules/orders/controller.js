@@ -616,9 +616,21 @@ async function updateOrderStatus(req, res, next) {
         const settings = await Settings.findOne({ key: 'global_config' });
         const platformCommissionPercent = settings ?  settings.platformCommissionPercent : 12;
         
-        // Hitung earnings: (totalAmount - adminFee) - (komisi platform)
-        const serviceRevenue = order.totalAmount - order.adminFee;
+        // 1. Hitung total additional fees yang statusnya 'paid'
+        const totalAdditionalFees = order.additionalFees
+          ? order.additionalFees
+              .filter(fee => fee.status === 'paid')
+              .reduce((sum, fee) => sum + fee.amount, 0)
+          : 0;
+
+        // 2. Hitung Revenue Dasar (Total Awal + Add-on - Admin Fee)
+        // Rumus: (Total Tagihan Customer + Biaya Tambahan) - Biaya Admin Aplikasi
+        const serviceRevenue = (order.totalAmount + totalAdditionalFees) - order.adminFee;
+
+        // 3. Hitung Komisi Platform
         const platformCommissionAmount = (serviceRevenue * platformCommissionPercent) / 100;
+
+        // 4. Hitung Earnings Bersih Provider
         const earningsAmount = serviceRevenue - platformCommissionAmount;
 
         // Update order status
@@ -630,7 +642,7 @@ async function updateOrderStatus(req, res, next) {
           throw new Error('Data mitra (provider) tidak ditemukan saat memproses earnings.');
         }
 
-        // 2. Gunakan providerDoc.userId untuk update saldo User
+        // 5. Gunakan providerDoc.userId untuk update saldo User
         const providerUser = await User.findByIdAndUpdate(
           providerDoc.userId, 
           { $inc: { balance: earningsAmount } },
@@ -641,12 +653,13 @@ async function updateOrderStatus(req, res, next) {
           throw new Error('Data user mitra tidak ditemukan.');
         }
 
-        // 3. Catat di earnings history dengan referensi yang benar
+        // 6. Catat di earnings history dengan referensi yang benar
         const earningsRecord = new Earnings({
           providerId: providerDoc._id,  // ID Dokumen Provider
           userId: providerDoc.userId,   // ID User milik Mitra
           orderId: order._id,
           totalAmount: order.totalAmount,
+          additionalFeeAmount: totalAdditionalFees, // [NEW] Simpan data biaya tambahan
           adminFee: order.adminFee,
           platformCommissionPercent: platformCommissionPercent,
           platformCommissionAmount: Math.round(platformCommissionAmount),
@@ -665,6 +678,7 @@ async function updateOrderStatus(req, res, next) {
             order: order,
             earnings: {
               totalAmount: order.totalAmount,
+              additionalFeeAmount: totalAdditionalFees,
               adminFee: order.adminFee,
               serviceRevenue: serviceRevenue,
               platformCommissionPercent: platformCommissionPercent,
