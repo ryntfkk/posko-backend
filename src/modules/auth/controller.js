@@ -411,6 +411,19 @@ async function switchRole(req, res, next) {
       });
     }
 
+    // [NEW] Jika switch ke provider, cek status verifikasi di Provider Model
+    if (role === 'provider') {
+        const provider = await Provider.findOne({ userId });
+        if (!provider) {
+            return res.status(403).json({ message: 'Data mitra tidak ditemukan.' });
+        }
+        if (provider.verificationStatus !== 'verified') {
+            return res.status(403).json({ 
+                message: `Akun Mitra Anda berstatus: ${provider.verificationStatus}. Menunggu verifikasi admin.` 
+            });
+        }
+    }
+
     user.activeRole = role;
     await user.save();
 
@@ -432,7 +445,7 @@ async function switchRole(req, res, next) {
 }
 
 // ===================
-// REGISTER PARTNER
+// REGISTER PARTNER (UPDATED)
 // ===================
 async function registerPartner(req, res, next) {
   try {
@@ -441,36 +454,75 @@ async function registerPartner(req, res, next) {
 
     if (!user) return res.status(404).json({ message: 'User tidak ditemukan' });
 
-    if (user.roles.includes('provider')) {
-      return res.status(400).json({ message: 'Anda sudah terdaftar sebagai Mitra.' });
-    }
-
-    // Tambahkan role provider
-    user.roles.push('provider');
-    user.activeRole = 'provider';
-    await user.save();
-
-    // Buat data Provider (kosongan dulu)
+    // Cek apakah sudah pernah mendaftar
     const existingProvider = await Provider.findOne({ userId });
-    if (!existingProvider) {
-      const newProvider = new Provider({
-        userId,
-        services: [],
-        rating: 0
-      });
-      await newProvider.save();
+    
+    if (existingProvider) {
+        if (existingProvider.verificationStatus === 'pending') {
+            return res.status(400).json({ message: 'Pendaftaran Anda sedang diproses. Mohon tunggu verifikasi admin.' });
+        }
+        if (existingProvider.verificationStatus === 'verified') {
+             // Jika role belum ada tapi status verified (edge case), tambahkan role
+             if (!user.roles.includes('provider')) {
+                 user.roles.push('provider');
+                 user.activeRole = 'provider';
+                 await user.save();
+             }
+             return res.status(400).json({ message: 'Anda sudah terdaftar sebagai Mitra.' });
+        }
+        if (existingProvider.verificationStatus === 'suspended') {
+            return res.status(403).json({ message: 'Akun Mitra Anda ditangguhkan. Hubungi admin.' });
+        }
+        // Jika rejected, user boleh update data untuk re-apply (lanjut ke bawah)
     }
 
-    const { accessToken, refreshToken } = generateTokens(user);
+    // Ambil data dari body dan files
+    const { experienceYears, description, serviceCategory, vehicleType } = req.body;
+    const files = req.files || {};
 
-    // [NEW] Set Cookies
-    setAuthCookies(res, accessToken, refreshToken);
+    // Validasi Dokumen Wajib
+    // Kita anggap form data mengirimkan field: 'ktp', 'selfieKtp', 'skck'
+    if (!files['ktp'] || !files['selfieKtp'] || !files['skck']) {
+        return res.status(400).json({ message: 'Dokumen KTP, Selfie KTP, dan SKCK wajib diunggah.' });
+    }
+
+    // Simpan path file
+    const docPaths = {
+        ktpUrl: files['ktp'] ? `/uploads/${files['ktp'][0].filename}` : '',
+        selfieKtpUrl: files['selfieKtp'] ? `/uploads/${files['selfieKtp'][0].filename}` : '',
+        skckUrl: files['skck'] ? `/uploads/${files['skck'][0].filename}` : '',
+        certificateUrl: files['certificate'] ? `/uploads/${files['certificate'][0].filename}` : ''
+    };
+
+    // Data Provider Baru / Update
+    const providerData = {
+        userId,
+        verificationStatus: 'pending', // Reset status ke pending (penting untuk re-apply)
+        documents: docPaths,
+        details: {
+            experienceYears: experienceYears || 0,
+            description: description || '',
+            serviceCategory: serviceCategory || '',
+            vehicleType: vehicleType || ''
+        },
+        // Reset services jika perlu atau biarkan kosong
+        services: existingProvider ? existingProvider.services : [],
+        rating: existingProvider ? existingProvider.rating : 0
+    };
+
+    if (existingProvider) {
+        await Provider.updateOne({ userId }, providerData);
+    } else {
+        await Provider.create(providerData);
+    }
+
+    // NOTE: KITA TIDAK MENAMBAHKAN ROLE PROVIDER DI SINI
+    // Role akan ditambahkan oleh Admin saat approval
 
     res.json({
-      message: 'Selamat! Anda berhasil mendaftar sebagai Mitra.',
+      message: 'Pendaftaran berhasil dikirim! Data Anda akan diverifikasi oleh Admin dalam 1x24 jam.',
       data: {
-        tokens: { accessToken, refreshToken },
-        profile: sanitizeUser(user)
+        verificationStatus: 'pending'
       }
     });
 

@@ -12,16 +12,16 @@ const providerSchema = new mongoose.Schema(
       {
         serviceId: {
           type: mongoose.Schema.Types.ObjectId,
-          ref: 'Service', 
+          ref: 'Service',
           required: true,
         },
         price: {
           type: Number,
-          required: true, 
+          required: true,
         },
         isActive: {
           type: Boolean,
-          default: true, 
+          default: true,
         },
       },
     ],
@@ -32,10 +32,9 @@ const providerSchema = new mongoose.Schema(
     // Status Online/Offline global (misal untuk mematikan akun sementara)
     isOnline: {
       type: Boolean,
-      default: true, 
+      default: true,
     },
     // [FITUR BARU] Daftar Tanggal Libur / Tidak Tersedia (Manual Block)
-    // Format penyimpanan di MongoDB: ISODate("2024-12-25T00:00:00.000Z")
     blockedDates: {
       type: [Date],
       default: [],
@@ -51,6 +50,32 @@ const providerSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    // [BARU] Status Verifikasi Mitra
+    verificationStatus: {
+      type: String,
+      enum: ['pending', 'verified', 'rejected', 'suspended'],
+      default: 'pending',
+      index: true
+    },
+    // [BARU] Dokumen Pendukung
+    documents: {
+      ktpUrl: { type: String, default: '' },
+      selfieKtpUrl: { type: String, default: '' },
+      skckUrl: { type: String, default: '' },
+      certificateUrl: { type: String, default: '' }
+    },
+    // [BARU] Detail Tambahan
+    details: {
+      experienceYears: { type: Number, default: 0 },
+      description: { type: String, default: '' }, // Bio profesional / keahlian
+      serviceCategory: { type: String, default: '' }, // Kategori utama
+      vehicleType: { type: String, default: '' } // Jenis kendaraan (jika ada)
+    },
+    // [BARU] Alasan Penolakan (Jika rejected)
+    rejectionReason: {
+      type: String,
+      default: ''
+    }
   },
   { timestamps: true }
 );
