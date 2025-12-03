@@ -1,5 +1,5 @@
 // src/modules/orders/controller.js
-const mongoose = require('mongoose');
+const mongoose = require('mongoose'); // [ADDED] Diperlukan untuk Transaction
 const Order = require('./model');
 const Provider = require('../providers/model');
 const Service = require('../services/model');
@@ -45,12 +45,30 @@ function getLocalDateComponents(dateInput, timeZone = DEFAULT_TIMEZONE) {
   }
 }
 
-// [NEW HELPER] Cek apakah provider punya order yang sedang berjalan
+// [FIXED HELPER] Cek apakah provider punya order yang sedang berjalan (BUSY STATUS)
+// Logika Baru: Hanya hitung order sebagai "Active/Busy" jika:
+// 1. Status 'working' atau 'on_the_way' (Sedang dikerjakan sekarang)
+// 2. Status 'accepted' TAPI jadwalnya adalah HARI INI. (Order masa depan tidak memblokir)
 async function getProviderActiveOrderCount(providerId) {
-  const activeStatuses = ['accepted', 'on_the_way', 'working'];
+  const now = new Date();
+  const startOfToday = new Date(now.setHours(0, 0, 0, 0));
+  const endOfToday = new Date(now.setHours(23, 59, 59, 999));
+
   const count = await Order.countDocuments({
     providerId: providerId,
-    status: { $in: activeStatuses }
+    $or: [
+      // Case 1: Sedang dikerjakan (Pasti Sibuk)
+      { status: { $in: ['on_the_way', 'working'] } },
+      
+      // Case 2: Diterima & Jadwalnya Hari Ini (Sibuk)
+      { 
+        status: 'accepted',
+        scheduledAt: {
+          $gte: startOfToday,
+          $lte: endOfToday
+        }
+      }
+    ]
   });
   return count;
 }
@@ -179,25 +197,20 @@ async function createOrder(req, res, next) {
       let realPrice;
 
       // --- [FIX UTAMA] PRICING LOGIC UNTUK DIRECT ORDER ---
-      // Prioritaskan harga dari Provider jika Direct Order
       if (orderType === 'direct' && providerData) {
-        // Cari layanan ini di daftar layanan provider
-        // Pastikan konversi ke string agar pembandingan ID akurat
         const providerService = providerData.services.find(
-          ps => ps.serviceId && ps.serviceId.toString() === item.serviceId.toString()
+          ps => ps.serviceId && ps.serviceId.toString() === item.serviceId.toString() && ps.isActive
         );
 
-        // Validasi: Apakah Provider benar-benar menyediakan layanan ini DAN aktif?
-        if (!providerService || !providerService.isActive) {
+        if (!providerService) {
           await session.abortTransaction();
           return res.status(400).json({ 
-            message: `Mitra ini tidak menyediakan layanan "${serviceDoc.name}" atau layanan sedang tidak aktif.` 
+            message: `Mitra ini tidak menyediakan layanan "${serviceDoc.name}".` 
           });
         }
 
         realPrice = providerService.price;
       } else {
-        // Jika Basic Order, gunakan harga dasar dari master Service
         realPrice = serviceDoc.price || serviceDoc.basePrice;
       }
 
@@ -457,23 +470,24 @@ async function listIncomingOrders(req, res, next) {
       .filter(s => s.isActive)
       .map(s => s.serviceId.toString());
     
-    // [FIXED] CEK APAKAH PROVIDER SUDAH PUNYA ORDER YANG SEDANG BERJALAN
+    // [FIXED] CEK APAKAH PROVIDER "SIBUK" HARI INI
     const activeOrderCount = await getProviderActiveOrderCount(provider._id);
+    const isBusy = activeOrderCount > 0;
     
     const orders = await Order.find({
       $or: [
-        // Basic order hanya ditampilkan jika provider TIDAK ADA yang lagi dikerjakan
+        // Basic order hanya ditampilkan jika provider TIDAK SIBUK (isBusy = false)
         { 
           orderType: 'basic', 
           status: 'searching',
           providerId: null, 
           'items.serviceId': { $in: myServiceIds },
-          // Hanya tampilkan jika provider tidak punya order aktif
-          $expr: { $eq: [activeOrderCount, 0] }
+          $expr: { $eq: [isBusy, false] } // Hanya tampil jika tidak sibuk
         },
+        // Provider selalu bisa melihat order miliknya sendiri (Direct atau Accepted)
         { 
           providerId: provider._id,
-          status: 'paid'
+          status: { $in: ['paid', 'accepted', 'on_the_way', 'working', 'waiting_approval'] }
         }
       ]
     })
@@ -482,26 +496,20 @@ async function listIncomingOrders(req, res, next) {
     .sort({ scheduledAt: 1 })
     .lean();
 
-    // [NEW] Jika provider sudah punya order aktif, filter basic orders
-    let filteredOrders = orders;
-    if (activeOrderCount > 0) {
-      filteredOrders = orders.filter(o => o.orderType !== 'basic' || o.status === 'paid');
-    }
-
     res.json({ 
       message: 'Daftar order masuk berhasil diambil',
       providerStatus: {
         activeOrderCount: activeOrderCount,
-        isBusy: activeOrderCount > 0
+        isBusy: isBusy
       },
-      data: filteredOrders 
+      data: orders 
     });
   } catch (error) {
     next(error);
   }
 }
 
-// 5. ACCEPT ORDER - [FIXED] CEK APAKAH PROVIDER SUDAH PUNYA ORDER YANG SEDANG BERJALAN
+// 5. ACCEPT ORDER - [FIXED] ATOMIC OPERATION UNTUK MENCEGAH RACE CONDITION
 async function acceptOrder(req, res, next) {
   try {
     const { orderId } = req.params;
@@ -512,61 +520,83 @@ async function acceptOrder(req, res, next) {
       return res.status(403).json({ message: 'Akses ditolak.' });
     }
 
-    const order = await Order.findById(orderId);
-    if (!order) {
+    // 1. Cek Ketersediaan Mitra (Client-side check logic on Server)
+    const activeOrderCount = await getProviderActiveOrderCount(provider._id);
+    
+    // Kita load order dulu SEKADAR untuk cek tipe order (Basic/Direct)
+    const orderCheck = await Order.findById(orderId).select('orderType status providerId scheduledAt').lean();
+    
+    if (!orderCheck) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan.' });
     }
 
-    const validStatuses = ['searching', 'paid'];
-    if (!validStatuses.includes(order.status)) {
-      return res.status(400).json({ 
-        message: 'Pesanan ini sudah tidak tersedia, sudah diambil, atau belum dibayar.' 
-      });
-    }
-
-    if (order.orderType === 'basic' && order.status !== 'searching') {
-      return res.status(400).json({ 
-        message: 'Basic order harus dalam status "searching" untuk diterima.' 
-      });
-    }
-
-    // [FIXED] CEK APAKAH PROVIDER SUDAH PUNYA ORDER YANG SEDANG BERJALAN
-    // Jika ini basic order dan provider sudah punya order aktif, tolak
-    if (order.orderType === 'basic') {
-      const activeOrderCount = await getProviderActiveOrderCount(provider._id);
+    // Validasi Khusus Basic Order
+    if (orderCheck.orderType === 'basic') {
       if (activeOrderCount > 0) {
         return res.status(400).json({ 
-          message: `Anda masih memiliki ${activeOrderCount} pesanan yang sedang dikerjakan. Selesaikan pesanan tersebut terlebih dahulu sebelum menerima pesanan baru.`,
+          message: `Anda sedang sibuk dengan ${activeOrderCount} pesanan aktif/hari ini. Selesaikan dulu untuk mengambil Basic Order.`,
           activeOrderCount: activeOrderCount
         });
       }
     }
 
-    if (order.orderType === 'direct') {
-      if (order.status !== 'paid') {
-        return res.status(400).json({ 
-          message: 'Direct order harus sudah dibayar untuk diterima.' 
-        });
-      }
-      if (order.providerId && order.providerId.toString() !== provider._id.toString()) {
-        return res.status(403).json({ 
-          message: 'Order ini ditujukan untuk mitra lain.' 
-        });
-      }
+    // Validasi Khusus Direct Order
+    if (orderCheck.orderType === 'direct') {
+       if (orderCheck.providerId && orderCheck.providerId.toString() !== provider._id.toString()) {
+          return res.status(403).json({ message: 'Order ini bukan untuk Anda.' });
+       }
+       if (orderCheck.status !== 'paid') {
+          return res.status(400).json({ message: 'Direct order belum dibayar.' });
+       }
+       // Direct order biasanya sudah ada providerId-nya, tinggal update status
+       // Tapi kita gunakan atomic update juga biar aman
     }
 
-    order.status = 'accepted';
-    order.providerId = provider._id;
-    await order.save();
+    // 2. ATOMIC UPDATE: Kunci sukses pencegahan Race Condition
+    // Kita mencoba mengupdate status HANYA JIKA status saat ini masih 'searching' (untuk Basic) atau 'paid' (untuk Direct)
+    // Dan belum diambil orang (providerId null untuk Basic)
+    
+    let query = { _id: orderId };
+    let update = { 
+      $set: { 
+        status: 'accepted', 
+        providerId: provider._id,
+        updatedAt: new Date()
+      } 
+    };
 
-    res.json({ message: 'Pesanan berhasil diterima! Segera hubungi pelanggan.', data: order });
+    if (orderCheck.orderType === 'basic') {
+      // Syarat ketat untuk Basic: Status harus searching DAN Provider harus Kosong
+      query.status = 'searching';
+      query.providerId = null; 
+    } else {
+      // Syarat untuk Direct: Status harus paid (dan providerId sudah cocok dicek diatas)
+      query.status = 'paid';
+    }
+
+    const updatedOrder = await Order.findOneAndUpdate(query, update, { new: true });
+
+    if (!updatedOrder) {
+      // Jika null, berarti kondisi query tidak terpenuhi (sudah diambil orang lain sepersekian detik yang lalu)
+      return res.status(409).json({ 
+        message: 'Maaf, pesanan ini baru saja diambil oleh mitra lain atau sudah tidak tersedia.' 
+      });
+    }
+
+    res.json({ 
+      message: 'Pesanan berhasil diterima! Segera hubungi pelanggan.', 
+      data: updatedOrder 
+    });
+
   } catch (error) {
     next(error);
   }
 }
 
-// 6. UPDATE ORDER STATUS
+// 6. UPDATE ORDER STATUS - [FIXED] EARNINGS TRANSACTION
 async function updateOrderStatus(req, res, next) {
+  let session = null;
+  
   try {
     const { orderId } = req.params;
     const { status } = req.body; 
@@ -586,6 +616,7 @@ async function updateOrderStatus(req, res, next) {
       return res.status(403).json({ message: 'Anda tidak memiliki akses ke pesanan ini' });
     }
 
+    // --- CASE 1: PROVIDER MENYELESAIKAN PEKERJAAN (Working -> Waiting Approval) ---
     if (status === 'waiting_approval' && isProvider) {
       if (order.status !== 'working') {
         return res.status(400).json({ 
@@ -593,8 +624,6 @@ async function updateOrderStatus(req, res, next) {
         });
       }
       
-      // [NEW] Validasi Dokumentasi Penyelesaian
-      // Provider wajib upload minimal 1 bukti foto sebelum menyelesaikan pekerjaan
       if (!order.completionEvidence || order.completionEvidence.length === 0) {
         return res.status(400).json({ 
           message: 'Wajib mengunggah minimal 1 foto dokumentasi pekerjaan selesai sebelum mengubah status.' 
@@ -609,6 +638,8 @@ async function updateOrderStatus(req, res, next) {
       });
     }
 
+    // --- CASE 2: CUSTOMER KONFIRMASI SELESAI (Waiting Approval -> Completed) ---
+    // [FIXED] Menggunakan Transaction untuk Integritas Data Earnings
     if (status === 'completed' && isCustomer) {
       if (order.status !== 'waiting_approval') {
         return res.status(400).json({ 
@@ -616,55 +647,55 @@ async function updateOrderStatus(req, res, next) {
         });
       }
 
-      // [NEW] CALCULATE EARNINGS KETIKA ORDER SELESAI
+      session = await mongoose.startSession();
+      session.startTransaction();
+
       try {
-        const settings = await Settings.findOne({ key: 'global_config' });
+        const settings = await Settings.findOne({ key: 'global_config' }).session(session);
         const platformCommissionPercent = settings ? settings.platformCommissionPercent : 12;
         
-        // 1. Hitung total additional fees yang statusnya 'paid'
+        // 1. Hitung Keuangan
         const totalAdditionalFees = order.additionalFees
           ? order.additionalFees
               .filter(fee => fee.status === 'paid')
               .reduce((sum, fee) => sum + fee.amount, 0)
           : 0;
 
-        // 2. Hitung Revenue Dasar (Total Awal + Add-on - Admin Fee)
-        // Rumus: (Total Tagihan Customer + Biaya Tambahan) - Biaya Admin Aplikasi
         const serviceRevenue = (order.totalAmount + totalAdditionalFees) - order.adminFee;
-
-        // 3. Hitung Komisi Platform
         const platformCommissionAmount = (serviceRevenue * platformCommissionPercent) / 100;
-
-        // 4. Hitung Earnings Bersih Provider
         const earningsAmount = serviceRevenue - platformCommissionAmount;
 
-        // Update order status
-        order.status = 'completed';
-        await order.save();
+        // 2. Update Order Status
+        // Kita gunakan findByIdAndUpdate dengan session agar masuk dalam transaksi
+        const finalizedOrder = await Order.findByIdAndUpdate(
+          order._id, 
+          { status: 'completed' },
+          { new: true, session: session }
+        );
 
-        const providerDoc = await Provider.findById(order.providerId);
+        const providerDoc = await Provider.findById(order.providerId).session(session);
         if (!providerDoc) {
           throw new Error('Data mitra (provider) tidak ditemukan saat memproses earnings.');
         }
 
-        // 5. Gunakan providerDoc.userId untuk update saldo User
+        // 3. Update Saldo Mitra
         const providerUser = await User.findByIdAndUpdate(
           providerDoc.userId, 
           { $inc: { balance: earningsAmount } },
-          { new: true }
+          { new: true, session: session }
         );
 
         if (!providerUser) {
           throw new Error('Data user mitra tidak ditemukan.');
         }
 
-        // 6. Catat di earnings history dengan referensi yang benar
+        // 4. Catat History Earnings
         const earningsRecord = new Earnings({
-          providerId: providerDoc._id,  // ID Dokumen Provider
-          userId: providerDoc.userId,   // ID User milik Mitra
+          providerId: providerDoc._id,
+          userId: providerDoc.userId,
           orderId: order._id,
           totalAmount: order.totalAmount,
-          additionalFeeAmount: totalAdditionalFees, // [NEW] Simpan data biaya tambahan
+          additionalFeeAmount: totalAdditionalFees,
           adminFee: order.adminFee,
           platformCommissionPercent: platformCommissionPercent,
           platformCommissionAmount: Math.round(platformCommissionAmount),
@@ -673,21 +704,19 @@ async function updateOrderStatus(req, res, next) {
           completedAt: new Date()
         });
 
-        await earningsRecord.save();
+        await earningsRecord.save({ session: session });
 
-        console.log(`✅ Earnings recorded for order ${order._id}: Rp ${Math.round(earningsAmount).toLocaleString('id-ID')}`);
+        // Commit jika semua lancar
+        await session.commitTransaction();
+        session.endSession();
+
+        console.log(`✅ Earnings recorded safely for order ${order._id}`);
 
         return res.json({ 
           message: 'Pesanan selesai! Terima kasih.', 
           data: {
-            order: order,
+            order: finalizedOrder,
             earnings: {
-              totalAmount: order.totalAmount,
-              additionalFeeAmount: totalAdditionalFees,
-              adminFee: order.adminFee,
-              serviceRevenue: serviceRevenue,
-              platformCommissionPercent: platformCommissionPercent,
-              platformCommissionAmount: Math.round(platformCommissionAmount),
               earningsAmount: Math.round(earningsAmount)
             },
             providerBalance: providerUser.balance
@@ -695,18 +724,17 @@ async function updateOrderStatus(req, res, next) {
         });
 
       } catch (earningsError) {
-        console.error('❌ Error calculating earnings:', earningsError);
-        // Tetap update order status meskipun earnings gagal dicatat
-        order.status = 'completed';
-        await order.save();
+        await session.abortTransaction();
+        session.endSession();
+        console.error('❌ Transaction failed:', earningsError);
         return res.status(500).json({ 
-          message: 'Pesanan selesai tapi ada error saat mencatat earnings', 
-          data: order,
+          message: 'Gagal menyelesaikan pesanan. Silakan coba lagi.', 
           error: earningsError.message 
         });
       }
     }
 
+    // --- CASE 3: STATUS LAINNYA (On The Way, Working, Cancelled) ---
     if (['on_the_way', 'working'].includes(status)) {
       if (!isProvider) {
         return res.status(403).json({ 
@@ -747,6 +775,7 @@ async function updateOrderStatus(req, res, next) {
     return res.status(400).json({ message: 'Status atau aksi tidak valid.' });
 
   } catch (error) {
+    if (session) session.endSession(); // Cleanup just in case
     next(error);
   }
 }
