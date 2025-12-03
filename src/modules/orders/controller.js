@@ -217,15 +217,24 @@ async function createOrder(req, res, next) {
     let lockedUserVoucher = null; 
 
     if (voucherCode) {
-      const userVoucher = await UserVoucher.findOne({ 
-        userId,
-        status: 'active'
-      }).populate({
-        path: 'voucherId',
-        match: { code: voucherCode.toUpperCase() }
+      // 1. Cari Master Voucher dulu untuk memastikan kode valid
+      const masterVoucher = await Voucher.findOne({ 
+        code: voucherCode.toUpperCase() 
       }).session(session);
 
-      if (!   userVoucher || !  userVoucher.voucherId) {
+      if (!masterVoucher) {
+        await session.abortTransaction();
+        return res.status(404).json({ message: 'Kode voucher tidak valid.' });
+      }
+
+      // 2. Cari UserVoucher spesifik berdasarkan voucherId yang ditemukan
+      const userVoucher = await UserVoucher.findOne({ 
+        userId,
+        voucherId: masterVoucher._id,
+        status: 'active'
+      }).populate('voucherId').session(session);
+
+      if (!userVoucher) {
         await session.abortTransaction();
         return res.status(404).json({ message: 'Voucher tidak valid atau belum diklaim.' });
       }
@@ -414,7 +423,7 @@ async function getOrderById(req, res, next) {
       .populate('voucherId', 'code description')
       .populate({
         path: 'providerId',
-        select: 'userId rating isOnline',
+        select: 'userId rating',
         populate: { path: 'userId', select: 'fullName phoneNumber profilePictureUrl' }
       })
       .populate('userId', 'fullName phoneNumber profilePictureUrl')

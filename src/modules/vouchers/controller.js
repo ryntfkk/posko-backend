@@ -1,8 +1,8 @@
 const Voucher = require('./model');
 const UserVoucher = require('./userVoucherModel');
 const Service = require('../services/model');
-const jwt = require('jsonwebtoken'); // [BARU] Import JWT
-const env = require('../../config/env'); // [BARU] Import Env
+const jwt = require('jsonwebtoken');
+const env = require('../../config/env');
 
 // 1. LIST AVAILABLE VOUCHERS (MARKETPLACE)
 // Menampilkan voucher global yang BELUM diklaim user (Support Guest & Logged User)
@@ -207,17 +207,27 @@ async function checkVoucher(req, res, next) {
       return res.status(400).json({ message: 'Kode voucher wajib diisi' });
     }
 
-    // A. Validasi Kepemilikan (Cek di UserVoucher)
-    const userVoucher = await UserVoucher.findOne({ 
-      userId,
-      status: 'active'
-    }).populate({
-      path: 'voucherId',
-      match: { code: code.toUpperCase() } 
+    // [FIXED LOGIC] 
+    // 1. Cari Master Voucher dulu berdasarkan kode untuk mendapatkan ID-nya
+    const masterVoucher = await Voucher.findOne({ 
+        code: code.toUpperCase() 
     });
 
-    if (!userVoucher || !userVoucher.voucherId) {
-      return res.status(404).json({ message: 'Voucher tidak valid atau belum diklaim.' });
+    if (!masterVoucher) {
+        // Jika kode voucher sama sekali tidak ada di sistem
+        return res.status(404).json({ message: 'Kode voucher tidak valid.' });
+    }
+
+    // 2. Cari di UserVoucher apakah user memiliki klaim AKTIF untuk voucher ID tersebut
+    // Kita harus spesifik mencari berdasarkan voucherId dari masterVoucher yang ditemukan
+    const userVoucher = await UserVoucher.findOne({ 
+      userId,
+      voucherId: masterVoucher._id,
+      status: 'active'
+    }).populate('voucherId');
+
+    if (!userVoucher) {
+      return res.status(404).json({ message: 'Voucher belum diklaim atau sudah terpakai.' });
     }
 
     const voucher = userVoucher.voucherId;

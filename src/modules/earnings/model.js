@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const earningsSchema = new mongoose. Schema({
+const earningsSchema = new mongoose.Schema({
   providerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Provider',
@@ -8,7 +8,7 @@ const earningsSchema = new mongoose. Schema({
     index: true
   },
   userId: {
-    type: mongoose. Schema.Types.ObjectId,
+    type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,
     index: true
@@ -23,6 +23,11 @@ const earningsSchema = new mongoose. Schema({
   totalAmount: {
     type: Number,
     required: true
+  },
+  // [BARU] Field untuk mencatat total biaya tambahan yang dibayar
+  additionalFeeAmount: {
+    type: Number,
+    default: 0
   },
   adminFee: {
     type: Number,

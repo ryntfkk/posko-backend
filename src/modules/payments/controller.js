@@ -257,20 +257,23 @@ async function handleNotification(req, res, next) {
         // Jika order sudah berjalan (working/on_the_way) -> ini kemungkinan pembayaran add-on
         else {
              // Cari semua biaya tambahan yang statusnya 'pending_approval'
-             // Kita update statusnya menjadi 'paid'
-             // (Asumsi user membayar lunas tagihan add-on yang pending)
+             // Kita update statusnya menjadi 'paid' menggunakan manipulasi langsung pada document order
+             // agar atomic dan Mongoose mendeteksi perubahan subdocument dengan benar.
              
              let updatedFees = false;
-             const updatedAdditionalFees = order.additionalFees.map(fee => {
-                 if (fee.status === 'pending_approval') {
-                     updatedFees = true;
-                     return { ...fee, status: 'paid' };
-                 }
-                 return fee;
-             });
+             
+             // Iterate langsung array di dalam document Mongoose
+             if (order.additionalFees && order.additionalFees.length > 0) {
+                 order.additionalFees.forEach(fee => {
+                     if (fee.status === 'pending_approval') {
+                         fee.status = 'paid';
+                         updatedFees = true;
+                     }
+                 });
+             }
 
              if (updatedFees) {
-                 await Order.findByIdAndUpdate(realOrderId, { additionalFees: updatedAdditionalFees });
+                 await order.save(); // Simpan perubahan pada document utama
                  console.log(`✅ Additional fees for order ${realOrderId} marked as paid`);
              }
         }
