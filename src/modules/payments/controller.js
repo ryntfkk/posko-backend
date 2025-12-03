@@ -6,6 +6,8 @@ const Order = require('../orders/model');
 const snap = require('../../utils/midtrans');
 const { checkMidtransConfig } = require('../../utils/midtransConfig');
 const env = require('../../config/env');
+const UserVoucher = require('../vouchers/userVoucherModel'); // [NEW] Import UserVoucher
+const Voucher = require('../vouchers/model'); // [NEW] Import Voucher
 
 async function listPayments(req, res, next) {
   try {
@@ -149,6 +151,7 @@ async function createPayment(req, res, next) {
       amount: grossAmount,
       method: 'midtrans_snap',
       status: 'pending',
+      // Bisa tambahkan field meta/type jika schema mendukung, tapi sementara pakai logic status order
     });
     await payment.save();
 
@@ -168,12 +171,11 @@ async function createPayment(req, res, next) {
   }
 }
 
-// [FIXED] HANDLE NOTIFICATION WITH ATOMIC UPDATES
-// Mencegah Webhook menimpa data yang sedang diedit user lain (Concurrency Fix)
 async function handleNotification(req, res, next) {
   try {
     const notification = req.body;
     
+    // [SECURITY FIX] Verifikasi Signature Key Midtrans
     const { order_id, status_code, gross_amount, signature_key } = notification;
     const serverKey = env.midtransKey;
 
@@ -204,8 +206,8 @@ async function handleNotification(req, res, next) {
         return res.status(200).json({ message: 'Invalid Order ID ignored' });
     }
 
-    // 3. Cek Status Order saat ini (Hanya Load field yang diperlukan)
-    const order = await Order.findById(realOrderId).select('status totalAmount orderType');
+    // 3. Validasi & Ambil Order
+    const order = await Order.findById(realOrderId);
     if (!order) {
         return res.status(404).json({ message: 'Order not found in DB' });
     }
@@ -228,65 +230,93 @@ async function handleNotification(req, res, next) {
 
     console.log(`🔔 Webhook: ${realOrderId} status ${paymentStatus} (${transactionStatus}) - Amount: ${notifAmount}`);
 
-    // 5. Update Database dengan Atomic Operators ($set)
+    // 5. Update Database
     if (paymentStatus === 'paid') {
         // A. Update Payment Record
         await Payment.findOneAndUpdate(
             { 
                 orderId: realOrderId, 
                 status: 'pending',
-                amount: notifAmount
+                amount: notifAmount 
             }, 
             { status: 'paid' }
         );
         
-        // B. Update Order / Additional Fees secara Atomic
-        // Logika: Jika order masih pending -> ini pembayaran utama
+        // B. Update Order / Additional Fees
         if (order.status === 'pending') {
-             // Toleransi selisih nominal kecil (rounding error)
+             // Cek kesesuaian nominal utama
              if (Math.abs(notifAmount - order.totalAmount) <= 500) { 
                  const nextStatus = order.orderType === 'direct' ? 'paid' : 'searching';
-                 
-                 // Atomic Update: Hanya ubah status, jangan sentuh field lain
-                 await Order.findByIdAndUpdate(realOrderId, { 
-                    $set: { status: nextStatus } 
-                 });
-                 
-                 console.log(`✅ Order ${realOrderId} updated to ${nextStatus} atomically`);
+                 await Order.findByIdAndUpdate(realOrderId, { status: nextStatus });
+                 console.log(`✅ Order ${realOrderId} updated to ${nextStatus}`);
              } else {
                  console.warn(`⚠️ Payment amount ${notifAmount} does not match order total ${order.totalAmount}`);
              }
         } 
-        // Jika order sudah berjalan (working/on_the_way) -> ini kemungkinan pembayaran add-on
         else {
-             // Atomic Update untuk Array Item:
-             // Update semua item di array `additionalFees` yang statusnya 'pending_approval' menjadi 'paid'
-             // Tanpa meload dan menimpa dokumen utama.
-             const result = await Order.updateOne(
-                { _id: realOrderId },
-                { 
-                  $set: { "additionalFees.$[elem].status": "paid" } 
-                },
-                { 
-                  arrayFilters: [{ "elem.status": "pending_approval" }] 
-                }
-             );
+             // [FIXED] Pembayaran Add-on (Validation & Match)
+             // Hanya lunasi fee jika total tagihan pending COCOK dengan jumlah yang dibayar
+             
+             // 1. Cari semua fee yang 'pending_approval'
+             const pendingFees = order.additionalFees.filter(f => f.status === 'pending_approval');
+             
+             // 2. Hitung total yang seharusnya dibayar
+             const totalPendingAmount = pendingFees.reduce((sum, f) => sum + f.amount, 0);
+             
+             // 3. Validasi dengan toleransi kecil (500 perak) untuk pembulatan
+             if (Math.abs(notifAmount - totalPendingAmount) <= 500) {
+                 let updatedFees = false;
+                 
+                 order.additionalFees.forEach(fee => {
+                     if (fee.status === 'pending_approval') {
+                         fee.status = 'paid';
+                         updatedFees = true;
+                     }
+                 });
 
-             if (result.modifiedCount > 0) {
-                 console.log(`✅ Additional fees for order ${realOrderId} marked as paid atomically`);
+                 if (updatedFees) {
+                     await order.save(); 
+                     console.log(`✅ Additional fees for order ${realOrderId} marked as paid (Total: ${totalPendingAmount})`);
+                 }
              } else {
-                 console.log(`ℹ️ No pending fees matched for atomic update on order ${realOrderId}`);
+                 console.error(`🚨 Payment Mismatch for Add-on! Paid: ${notifAmount}, Expected: ${totalPendingAmount}. Fees NOT updated.`);
+                 // Opsional: Anda bisa membuat record 'Unidentified Payment' di database untuk review manual admin
              }
         }
 
-    } else if (paymentStatus === 'failed') {
+    } 
+    // [UPDATE] Handle Expire / Failed
+    else if (paymentStatus === 'failed') {
+        // Update Payment Record
         await Payment.findOneAndUpdate(
             { orderId: realOrderId, status: 'pending' }, 
             { status: 'failed' }
         );
-        
+
+        // Jika order masih pending (belum diproses mitra), batalkan order
         if (order.status === 'pending') {
-            await Order.findByIdAndUpdate(realOrderId, { $set: { status: 'cancelled' } });
+            await Order.findByIdAndUpdate(realOrderId, { status: 'cancelled' });
+            console.log(`❌ Order ${realOrderId} cancelled due to payment failure/expiry`);
+
+            // [NEW] Rollback Voucher if used
+            // Kita cari UserVoucher berdasarkan orderId yang baru saja dibatalkan
+            const userVoucher = await UserVoucher.findOne({ orderId: realOrderId });
+            
+            if (userVoucher) {
+                console.log(`↺ Rolling back voucher for order ${realOrderId}`);
+                
+                // 1. Reactivate User Voucher
+                userVoucher.status = 'active';
+                userVoucher.usageDate = null;
+                userVoucher.orderId = null; // Lepaskan dari order
+                await userVoucher.save();
+                
+                // 2. Increment Master Voucher Quota (Opsional, tapi adil)
+                // Jika order batal karena payment expire, kembalikan kuota ke master
+                if (order.voucherId) {
+                    await Voucher.findByIdAndUpdate(order.voucherId, { $inc: { quota: 1 } });
+                }
+            }
         }
     }
 

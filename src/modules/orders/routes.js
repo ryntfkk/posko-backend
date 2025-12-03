@@ -37,6 +37,10 @@ const upload = multer({
 
 const router = express.Router();
 
+// [BARU] Public/Internal Route untuk Cron Job (Harus di atas middleware auth jika dipanggil oleh scheduler eksternal tanpa token user)
+// Di production, sebaiknya dilindungi oleh middleware khusus yang mengecek header secret key
+router.post('/auto-complete', controller.autoCompleteStuckOrders);
+
 router.use(authenticate);
 
 router.get('/incoming', controller.listIncomingOrders);

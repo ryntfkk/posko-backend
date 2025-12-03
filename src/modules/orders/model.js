@@ -86,6 +86,12 @@ const orderSchema = new mongoose.Schema(
       index: true
     },
     
+    // [NEW] Timestamp khusus untuk memantau stuck orders
+    waitingApprovalAt: {
+      type: Date,
+      default: null
+    },
+    
     // ============ FINANCIAL DETAILS (UPDATED) ============
     totalAmount: {
       type: Number,
