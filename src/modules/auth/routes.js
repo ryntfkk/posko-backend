@@ -76,5 +76,7 @@ router.post('/register-partner', authenticate, uploadPartnerDocs, controller.reg
 // [BARU] Admin Routes untuk Manajemen User
 router.get('/users', authenticate, controller.listAllUsers);
 router.patch('/users/:id/status', authenticate, controller.toggleUserStatus);
+// [BARU] Endpoint Edit User oleh Admin
+router.put('/users/:id', authenticate, controller.updateUserByAdmin);
 
 module.exports = router;

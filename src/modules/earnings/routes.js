@@ -4,14 +4,16 @@ const authenticate = require('../../middlewares/auth');
 
 const router = express.Router();
 
-// Semua route di bawah ini membutuhkan login (Provider)
 router.use(authenticate);
 
-// GET /api/earnings/summary - Ambil ringkasan statistik
+// Provider Routes
 router.get('/summary', controller.getEarningsSummary);
-
-// GET /api/earnings - Ambil list riwayat
 router.get('/', controller.listEarnings);
 
+// Admin Routes
 router.get('/platform-stats', authenticate, controller.getPlatformStats);
+// [BARU] Route untuk manajemen pencairan
+router.get('/all', authenticate, controller.listAllEarnings);
+router.patch('/:id/payout', authenticate, controller.processPayout);
+
 module.exports = router;

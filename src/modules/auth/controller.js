@@ -640,6 +640,48 @@ async function toggleUserStatus(req, res, next) {
   }
 }
 
+// ===================
+// ADMIN: UPDATE USER DATA (EDIT)
+// ===================
+async function updateUserByAdmin(req, res, next) {
+  try {
+    // 1. Validasi Akses Admin
+    const { roles = [] } = req.user || {};
+    if (!roles.includes('admin')) {
+      return res.status(403).json({ message: 'Akses ditolak. Hanya admin.' });
+    }
+
+    const { id } = req.params;
+    const { fullName, email, phoneNumber, bio } = req.body;
+
+    // 2. Cari User
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: 'User tidak ditemukan' });
+    }
+
+    // 3. Update Data (Validasi email unik jika email diubah)
+    if (email && email.toLowerCase() !== user.email) {
+      const exist = await User.findOne({ email: email.toLowerCase() });
+      if (exist) return res.status(400).json({ message: 'Email sudah digunakan user lain' });
+      user.email = email.toLowerCase();
+    }
+
+    if (fullName) user.fullName = fullName;
+    if (phoneNumber) user.phoneNumber = phoneNumber;
+    if (bio !== undefined) user.bio = bio;
+
+    await user.save();
+
+    res.json({
+      message: 'Data user berhasil diperbarui',
+      data: sanitizeUser(user)
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = { 
   register, 
   login, 
@@ -650,5 +692,6 @@ module.exports = {
   switchRole,
   registerPartner,
   listAllUsers,
-  toggleUserStatus
+  toggleUserStatus,
+  updateUserByAdmin
 };

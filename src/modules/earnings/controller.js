@@ -1,13 +1,11 @@
 const Earnings = require('./model');
 const mongoose = require('mongoose');
 
-// 1. LIST EARNINGS HISTORY
+// 1. LIST EARNINGS HISTORY (Provider)
 async function listEarnings(req, res, next) {
   try {
     const userId = req.user.userId;
 
-    // Ambil data earnings berdasarkan userId provider yang sedang login
-    // Urutkan dari yang terbaru (completedAt desc)
     const earnings = await Earnings.find({ userId })
       .sort({ completedAt: -1 })
       .lean();
@@ -21,12 +19,11 @@ async function listEarnings(req, res, next) {
   }
 }
 
-// 2. GET EARNINGS SUMMARY
+// 2. GET EARNINGS SUMMARY (Provider)
 async function getEarningsSummary(req, res, next) {
   try {
     const userId = req.user.userId;
 
-    // Gunakan Aggregation untuk menghitung total statistik
     const stats = await Earnings.aggregate([
       { 
         $match: { 
@@ -50,7 +47,6 @@ async function getEarningsSummary(req, res, next) {
       completedOrders: 0
     };
 
-    // Hitung rata-rata
     const averageEarningsPerOrder = result.completedOrders > 0 
       ? result.totalEarnings / result.completedOrders 
       : 0;
@@ -67,21 +63,21 @@ async function getEarningsSummary(req, res, next) {
     next(error);
   }
 }
-// [BARU] ADMIN: Get Platform Financial Stats
+
+// 3. ADMIN: Get Platform Financial Stats
 async function getPlatformStats(req, res, next) {
   try {
     const { roles = [] } = req.user || {};
     if (!roles.includes('admin')) return res.status(403).json({ message: 'Forbidden' });
 
-    // Aggregation untuk menghitung total
     const stats = await Earnings.aggregate([
-      { $match: { status: 'completed' } }, // Hanya yang sudah selesai
+      { $match: { status: 'completed' } },
       {
         $group: {
           _id: null,
-          totalTransactionValue: { $sum: '$totalAmount' }, // Gekross Transaction Volume
-          totalPlatformRevenue: { $sum: '$platformCommissionAmount' }, // Pendapatan Kita
-          totalAdminFees: { $sum: '$adminFee' }, // Biaya Admin
+          totalTransactionValue: { $sum: '$totalAmount' },
+          totalPlatformRevenue: { $sum: '$platformCommissionAmount' },
+          totalAdminFees: { $sum: '$adminFee' },
           totalOrders: { $sum: 1 }
         }
       }
@@ -94,7 +90,6 @@ async function getPlatformStats(req, res, next) {
       totalOrders: 0
     };
 
-    // Total Pendapatan Bersih Platform = Komisi % + Biaya Admin flat
     data.netRevenue = data.totalPlatformRevenue + data.totalAdminFees;
 
     res.json({ message: 'Platform stats retrieved', data });
@@ -102,8 +97,77 @@ async function getPlatformStats(req, res, next) {
     next(error);
   }
 }
+
+// [BARU] ADMIN: List All Earnings (Untuk Pencairan)
+async function listAllEarnings(req, res, next) {
+  try {
+    const { roles = [] } = req.user || {};
+    if (!roles.includes('admin')) return res.status(403).json({ message: 'Forbidden' });
+
+    const { page = 1, limit = 20, status } = req.query; // status: 'completed' (siap cair), 'paid_out' (sudah)
+    const filter = {};
+    if (status) filter.status = status;
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const earnings = await Earnings.find(filter)
+      .populate({
+        path: 'providerId',
+        select: 'bankAccount userId',
+        populate: { path: 'userId', select: 'fullName email' }
+      })
+      .sort({ completedAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    const total = await Earnings.countDocuments(filter);
+
+    res.json({
+      message: 'Data pendapatan mitra berhasil diambil',
+      data: earnings,
+      meta: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// [BARU] ADMIN: Process Payout (Tandai Sudah Transfer)
+async function processPayout(req, res, next) {
+  try {
+    const { roles = [] } = req.user || {};
+    if (!roles.includes('admin')) return res.status(403).json({ message: 'Forbidden' });
+
+    const { id } = req.params; // ID Earnings
+
+    const earning = await Earnings.findById(id);
+    if (!earning) return res.status(404).json({ message: 'Data tidak ditemukan' });
+
+    if (earning.status !== 'completed') {
+      return res.status(400).json({ message: 'Hanya status "completed" yang bisa dicairkan.' });
+    }
+
+    earning.status = 'paid_out';
+    earning.paidOutAt = new Date();
+    await earning.save();
+
+    res.json({
+      message: 'Status berhasil diubah menjadi Paid Out',
+      data: earning
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = {
   listEarnings,
   getEarningsSummary,
-  getPlatformStats
+  getPlatformStats,
+  listAllEarnings,
+  processPayout
 };

@@ -639,19 +639,56 @@ async function updateOrderStatus(req, res, next) {
     const { orderId } = req.params;
     const { status } = req.body; 
     const userId = req.user.userId;
+    const { roles = [] } = req.user; // Ambil roles dari token
 
     const order = await Order.findById(orderId);
     if (!order) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
     }
 
+    // [UPDATED] PERMISSION CHECK
     const isCustomer = order.userId.toString() === userId;
     const provider = await Provider.findOne({ userId }).lean();
     const isProvider = order.providerId && provider && 
                        order.providerId.toString() === provider._id.toString();
+    const isAdmin = roles.includes('admin'); // Cek jika user adalah admin
 
-    if (!isCustomer && !isProvider) {
+    // Izinkan akses jika Customer, Provider, ATAU Admin
+    if (!isCustomer && !isProvider && !isAdmin) {
       return res.status(403).json({ message: 'Anda tidak memiliki akses ke pesanan ini' });
+    }
+
+    // --- ADMIN OVERRIDE LOGIC ---
+    if (isAdmin) {
+      // Admin bisa membatalkan order atau menyelesaikan order secara paksa
+      if (status === 'cancelled') {
+        order.status = 'cancelled';
+        order.orderNote = (order.orderNote || '') + '\n[ADMIN] Dibatalkan oleh Admin.';
+        await order.save();
+        return res.json({ message: 'Pesanan dibatalkan oleh Admin', data: order });
+      }
+
+      if (status === 'completed') {
+        // Coba hitung earnings, jika gagal tetap selesaikan status order
+        try {
+          // Hanya hitung earnings jika belum pernah selesai sebelumnya
+          const earningsCheck = await Earnings.findOne({ orderId: order._id });
+          if (!earningsCheck && order.providerId) {
+             await calculateAndProcessEarnings(order);
+          }
+        } catch (err) {
+          console.error('[ADMIN FORCE COMPLETE] Earnings Error:', err.message);
+        }
+        
+        order.status = 'completed';
+        order.waitingApprovalAt = null;
+        order.orderNote = (order.orderNote || '') + '\n[ADMIN] Diselesaikan paksa oleh Admin.';
+        await order.save();
+        return res.json({ message: 'Pesanan diselesaikan paksa oleh Admin', data: order });
+      }
+      
+      // Admin bisa mengubah status lain juga jika diperlukan, tapi hati-hati
+      // Untuk keamanan, sementara batasi Admin hanya Cancel/Complete atau fallback ke logic bawah
     }
 
     // [FIX] Update untuk Provider: Set Waiting Approval
@@ -741,6 +778,7 @@ async function updateOrderStatus(req, res, next) {
     }
 
     if (status === 'cancelled') {
+      // Customer logic cancellation
       const nonCancellableStatuses = ['completed', 'working', 'waiting_approval'];
       
       if (nonCancellableStatuses.includes(order.status)) {
