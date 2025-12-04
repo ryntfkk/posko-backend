@@ -34,4 +34,5 @@ router.get('/:id', controller.getProviderById);
 // POST /api/providers/ (Daftar jadi provider)
 router.post('/', validateCreateProvider, controller.createProvider);
 
+router.put('/:id/verify', authenticate, controller.verifyProvider);
 module.exports = router;

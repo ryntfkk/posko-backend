@@ -421,6 +421,44 @@ async function toggleOnlineStatus(req, res, next) {
     next(error);
   }
 }
+// [BARU] Fungsi Verifikasi Mitra (Admin Only)
+async function verifyProvider(req, res, next) {
+  try {
+    const { id } = req.params; // ID Provider
+    const { status, rejectionReason } = req.body; // 'verified' | 'rejected'
+
+    if (!['verified', 'rejected'].includes(status)) {
+      return res.status(400).json({ message: 'Status harus verified atau rejected' });
+    }
+
+    const provider = await Provider.findById(id);
+    if (!provider) return res.status(404).json({ message: 'Mitra tidak ditemukan' });
+
+    provider.verificationStatus = status;
+    
+    if (status === 'rejected') {
+      provider.rejectionReason = rejectionReason || 'Dokumen tidak sesuai';
+    } else {
+      provider.rejectionReason = ''; // Reset jika verified
+    }
+
+    await provider.save();
+
+    // Jika verified, pastikan role user juga 'provider' (jaga-jaga)
+    if (status === 'verified') {
+      await User.findByIdAndUpdate(provider.userId, {
+        $addToSet: { roles: 'provider' }
+      });
+    }
+
+    res.json({
+      message: `Status mitra berhasil diubah menjadi ${status}`,
+      data: provider
+    });
+  } catch (error) {
+    next(error);
+  }
+}
 
 // [DIHAPUS] Function updateSchedule sudah dihapus
 
@@ -432,5 +470,6 @@ module.exports = {
   updateAvailability,
   updatePortfolio,
   updateProviderServices,
-  toggleOnlineStatus
+  toggleOnlineStatus,
+  verifyProvider
 };

@@ -68,5 +68,46 @@ async function createService(req, res, next) {
     next(error);
   }
 }
+// [BARU] Update Layanan
+async function updateService(req, res, next) {
+  try {
+    const { roles = [] } = req.user || {};
+    if (!roles.includes('admin')) {
+      return res.status(403).json({ message: 'Akses ditolak.' });
+    }
 
-module.exports = { listServices, createService };
+    const { id } = req.params;
+    const updates = req.body;
+
+    const service = await Service.findByIdAndUpdate(id, updates, { 
+      new: true, 
+      runValidators: true 
+    });
+
+    if (!service) return res.status(404).json({ message: 'Layanan tidak ditemukan' });
+
+    res.json({ message: 'Layanan berhasil diperbarui', data: service });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// [BARU] Hapus Layanan
+async function deleteService(req, res, next) {
+  try {
+    const { roles = [] } = req.user || {};
+    if (!roles.includes('admin')) {
+      return res.status(403).json({ message: 'Akses ditolak.' });
+    }
+
+    const { id } = req.params;
+    const service = await Service.findByIdAndDelete(id);
+
+    if (!service) return res.status(404).json({ message: 'Layanan tidak ditemukan' });
+
+    res.json({ message: 'Layanan berhasil dihapus', data: service });
+  } catch (error) {
+    next(error);
+  }
+}
+module.exports = { listServices, createService, updateService, deleteService};

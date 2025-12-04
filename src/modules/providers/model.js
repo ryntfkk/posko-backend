@@ -34,44 +34,67 @@ const providerSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
-    // [FITUR BARU] Daftar Tanggal Libur / Tidak Tersedia (Manual Block)
+    // Daftar Tanggal Libur / Tidak Tersedia (Manual Block)
     blockedDates: {
       type: [Date],
       default: [],
       index: true
     },
-    // [BARU] Portfolio/Dokumentasi - Gambar hasil kerja mitra
+    // Portfolio/Dokumentasi - Gambar hasil kerja mitra
     portfolioImages: {
       type: [String], // Array of image URLs
       default: [],
     },
-    // [BARU] Total pesanan selesai untuk statistik
+    // Total pesanan selesai untuk statistik
     totalCompletedOrders: {
       type: Number,
       default: 0,
     },
-    // [BARU] Status Verifikasi Mitra
+    // Status Verifikasi Mitra
     verificationStatus: {
       type: String,
       enum: ['pending', 'verified', 'rejected', 'suspended'],
       default: 'pending',
       index: true
     },
-    // [BARU] Dokumen Pendukung
+    // [BARU] Informasi Personal Mendalam
+    personalInfo: {
+      nik: { type: String, default: '' },
+      dateOfBirth: { type: Date },
+      gender: { type: String, enum: ['Laki-laki', 'Perempuan'], default: 'Laki-laki' }
+    },
+    // [BARU] Alamat Domisili (Bisa beda dengan KTP)
+    domicileAddress: {
+      type: String,
+      default: ''
+    },
+    // [BARU] Informasi Rekening Bank (Untuk Pencairan Dana)
+    bankAccount: {
+      bankName: { type: String, default: '' },
+      accountNumber: { type: String, default: '' },
+      accountHolderName: { type: String, default: '' }
+    },
+    // [BARU] Kontak Darurat
+    emergencyContact: {
+      name: { type: String, default: '' },
+      relationship: { type: String, default: '' },
+      phoneNumber: { type: String, default: '' }
+    },
+    // Dokumen Pendukung
     documents: {
       ktpUrl: { type: String, default: '' },
       selfieKtpUrl: { type: String, default: '' },
       skckUrl: { type: String, default: '' },
       certificateUrl: { type: String, default: '' }
     },
-    // [BARU] Detail Tambahan
+    // Detail Tambahan
     details: {
       experienceYears: { type: Number, default: 0 },
       description: { type: String, default: '' }, // Bio profesional / keahlian
       serviceCategory: { type: String, default: '' }, // Kategori utama
       vehicleType: { type: String, default: '' } // Jenis kendaraan (jika ada)
     },
-    // [BARU] Alasan Penolakan (Jika rejected)
+    // Alasan Penolakan (Jika rejected)
     rejectionReason: {
       type: String,
       default: ''

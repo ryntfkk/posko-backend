@@ -67,8 +67,43 @@ async function getEarningsSummary(req, res, next) {
     next(error);
   }
 }
+// [BARU] ADMIN: Get Platform Financial Stats
+async function getPlatformStats(req, res, next) {
+  try {
+    const { roles = [] } = req.user || {};
+    if (!roles.includes('admin')) return res.status(403).json({ message: 'Forbidden' });
 
+    // Aggregation untuk menghitung total
+    const stats = await Earnings.aggregate([
+      { $match: { status: 'completed' } }, // Hanya yang sudah selesai
+      {
+        $group: {
+          _id: null,
+          totalTransactionValue: { $sum: '$totalAmount' }, // Gekross Transaction Volume
+          totalPlatformRevenue: { $sum: '$platformCommissionAmount' }, // Pendapatan Kita
+          totalAdminFees: { $sum: '$adminFee' }, // Biaya Admin
+          totalOrders: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const data = stats[0] || {
+      totalTransactionValue: 0,
+      totalPlatformRevenue: 0,
+      totalAdminFees: 0,
+      totalOrders: 0
+    };
+
+    // Total Pendapatan Bersih Platform = Komisi % + Biaya Admin flat
+    data.netRevenue = data.totalPlatformRevenue + data.totalAdminFees;
+
+    res.json({ message: 'Platform stats retrieved', data });
+  } catch (error) {
+    next(error);
+  }
+}
 module.exports = {
   listEarnings,
-  getEarningsSummary
+  getEarningsSummary,
+  getPlatformStats
 };

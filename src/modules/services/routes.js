@@ -10,5 +10,6 @@ router.get('/', controller.listServices);
 
 // Private (Admin): Harus login & punya role admin untuk buat layanan
 router.post('/', authenticate, validateCreateService, controller.createService);
-
+router.put('/:id', authenticate, controller.updateService);
+router.delete('/:id', authenticate, controller.deleteService);
 module.exports = router;

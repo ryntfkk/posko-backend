@@ -13,4 +13,5 @@ router.get('/summary', controller.getEarningsSummary);
 // GET /api/earnings - Ambil list riwayat
 router.get('/', controller.listEarnings);
 
+router.get('/platform-stats', authenticate, controller.getPlatformStats);
 module.exports = router;

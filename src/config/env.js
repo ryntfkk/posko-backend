@@ -60,12 +60,12 @@ function getCorsOrigins() {
     if (!origins.includes('http://localhost:3000')) origins.push('http://localhost:3000');
     if (!origins.includes('http://localhost:3001')) origins.push('http://localhost:3001');
     if (!origins.includes('http://localhost:3002')) origins.push('http://localhost:3002');
-
+    if (!origins.includes('http://localhost:5173')) origins.push('http://localhost:5173');
     // [UPDATED] IP Network Lokal Anda (PC)
     // Ini mengizinkan akses dari HP ke Frontend di port 3000, 3001, dan 3002
     const myIp = 'http://192.168.0.172';
     
-    const localPorts = [3000, 3001, 3002];
+    const localPorts = [3000, 3001, 3002, 5173];
     localPorts.forEach(port => {
       const origin = `${myIp}:${port}`;
       if (!origins.includes(origin)) {

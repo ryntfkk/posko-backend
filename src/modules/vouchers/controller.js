@@ -312,10 +312,69 @@ async function checkVoucher(req, res, next) {
     next(error);
   }
 }
+// [BARU] ADMIN: List Semua Voucher (Tanpa filter kuota/expired)
+async function listAllVouchers(req, res, next) {
+  try {
+    const { roles = [] } = req.user || {};
+    if (!roles.includes('admin')) return res.status(403).json({ message: 'Forbidden' });
 
+    const vouchers = await Voucher.find().sort({ createdAt: -1 });
+    res.json({ message: 'All vouchers', data: vouchers });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// [BARU] ADMIN: Create Voucher
+async function createVoucher(req, res, next) {
+  try {
+    const { roles = [] } = req.user || {};
+    if (!roles.includes('admin')) return res.status(403).json({ message: 'Forbidden' });
+
+    const voucher = new Voucher(req.body);
+    await voucher.save();
+    res.status(201).json({ message: 'Voucher created', data: voucher });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// [BARU] ADMIN: Update Voucher
+async function updateVoucher(req, res, next) {
+  try {
+    const { roles = [] } = req.user || {};
+    if (!roles.includes('admin')) return res.status(403).json({ message: 'Forbidden' });
+
+    const { id } = req.params;
+    const voucher = await Voucher.findByIdAndUpdate(id, req.body, { new: true });
+    if (!voucher) return res.status(404).json({ message: 'Voucher not found' });
+
+    res.json({ message: 'Voucher updated', data: voucher });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// [BARU] ADMIN: Delete Voucher
+async function deleteVoucher(req, res, next) {
+  try {
+    const { roles = [] } = req.user || {};
+    if (!roles.includes('admin')) return res.status(403).json({ message: 'Forbidden' });
+
+    const { id } = req.params;
+    await Voucher.findByIdAndDelete(id);
+    res.json({ message: 'Voucher deleted' });
+  } catch (error) {
+    next(error);
+  }
+}
 module.exports = { 
   listAvailableVouchers, 
   listMyVouchers, 
   claimVoucher, 
-  checkVoucher 
+  checkVoucher,
+  listAllVouchers,
+  createVoucher,
+  updateVoucher,
+  deleteVoucher
 };

@@ -445,7 +445,7 @@ async function switchRole(req, res, next) {
 }
 
 // ===================
-// REGISTER PARTNER (UPDATED)
+// REGISTER PARTNER (UPDATED V2 - Full Data)
 // ===================
 async function registerPartner(req, res, next) {
   try {
@@ -473,15 +473,19 @@ async function registerPartner(req, res, next) {
         if (existingProvider.verificationStatus === 'suspended') {
             return res.status(403).json({ message: 'Akun Mitra Anda ditangguhkan. Hubungi admin.' });
         }
-        // Jika rejected, user boleh update data untuk re-apply (lanjut ke bawah)
     }
 
-    // Ambil data dari body dan files
-    const { experienceYears, description, serviceCategory, vehicleType } = req.body;
+    // Ambil data dari body (FormData dikirim sebagai string, kecuali file)
+    const { 
+      experienceYears, description, serviceCategory, vehicleType,
+      nik, dateOfBirth, gender, domicileAddress,
+      bankName, bankAccountNumber, bankAccountHolder,
+      emergencyName, emergencyRelation, emergencyPhone
+    } = req.body;
+
     const files = req.files || {};
 
     // Validasi Dokumen Wajib
-    // Kita anggap form data mengirimkan field: 'ktp', 'selfieKtp', 'skck'
     if (!files['ktp'] || !files['selfieKtp'] || !files['skck']) {
         return res.status(400).json({ message: 'Dokumen KTP, Selfie KTP, dan SKCK wajib diunggah.' });
     }
@@ -499,12 +503,37 @@ async function registerPartner(req, res, next) {
         userId,
         verificationStatus: 'pending', // Reset status ke pending (penting untuk re-apply)
         documents: docPaths,
+        
+        // [NEW] Data Personal
+        personalInfo: {
+            nik: nik || '',
+            dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
+            gender: gender || 'Laki-laki'
+        },
+        domicileAddress: domicileAddress || '',
+        
+        // [NEW] Data Bank
+        bankAccount: {
+            bankName: bankName || '',
+            accountNumber: bankAccountNumber || '',
+            accountHolderName: bankAccountHolder || ''
+        },
+        
+        // [NEW] Kontak Darurat
+        emergencyContact: {
+            name: emergencyName || '',
+            relationship: emergencyRelation || '',
+            phoneNumber: emergencyPhone || ''
+        },
+
+        // Detail Keahlian
         details: {
             experienceYears: experienceYears || 0,
             description: description || '',
             serviceCategory: serviceCategory || '',
             vehicleType: vehicleType || ''
         },
+        
         // Reset services jika perlu atau biarkan kosong
         services: existingProvider ? existingProvider.services : [],
         rating: existingProvider ? existingProvider.rating : 0
@@ -516,11 +545,8 @@ async function registerPartner(req, res, next) {
         await Provider.create(providerData);
     }
 
-    // NOTE: KITA TIDAK MENAMBAHKAN ROLE PROVIDER DI SINI
-    // Role akan ditambahkan oleh Admin saat approval
-
     res.json({
-      message: 'Pendaftaran berhasil dikirim! Data Anda akan diverifikasi oleh Admin dalam 1x24 jam.',
+      message: 'Pendaftaran lengkap berhasil dikirim! Admin akan memverifikasi data dan dokumen Anda segera.',
       data: {
         verificationStatus: 'pending'
       }
