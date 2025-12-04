@@ -557,6 +557,89 @@ async function registerPartner(req, res, next) {
   }
 }
 
+// ===================
+// ADMIN: LIST ALL USERS
+// ===================
+async function listAllUsers(req, res, next) {
+  try {
+    // Validasi Role Admin
+    const { roles = [] } = req.user || {};
+    if (!roles.includes('admin')) {
+      return res.status(403).json({ message: 'Akses ditolak. Hanya admin.' });
+    }
+
+    const { page = 1, limit = 20, search = '' } = req.query;
+    
+    // Filter pencarian
+    const filter = {};
+    if (search) {
+      filter.$or = [
+        { fullName: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const users = await User.find(filter)
+      .select('-password -refreshTokens') // Exclude sensitive info
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    const total = await User.countDocuments(filter);
+
+    res.json({
+      message: 'Daftar user berhasil diambil',
+      data: users,
+      meta: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        totalPages: Math.ceil(total / parseInt(limit))
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+// ===================
+// ADMIN: TOGGLE USER STATUS (BAN/UNBAN)
+// ===================
+async function toggleUserStatus(req, res, next) {
+  try {
+    const { roles = [] } = req.user || {};
+    if (!roles.includes('admin')) {
+      return res.status(403).json({ message: 'Akses ditolak.' });
+    }
+
+    const { id } = req.params;
+    const { status } = req.body; // 'active' or 'inactive'
+
+    if (!['active', 'inactive'].includes(status)) {
+      return res.status(400).json({ message: 'Status harus active atau inactive' });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      id,
+      { status },
+      { new: true }
+    ).select('-password');
+
+    if (!user) {
+      return res.status(404).json({ message: 'User tidak ditemukan' });
+    }
+
+    res.json({
+      message: `Status user berhasil diubah menjadi ${status}`,
+      data: user
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = { 
   register, 
   login, 
@@ -565,5 +648,7 @@ module.exports = {
   getProfile,
   updateProfile, 
   switchRole,
-  registerPartner
+  registerPartner,
+  listAllUsers,
+  toggleUserStatus
 };

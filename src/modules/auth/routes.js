@@ -73,4 +73,8 @@ router.post('/switch-role', authenticate, controller.switchRole);
 // [UPDATE] Gunakan middleware uploadPartnerDocs untuk pendaftaran mitra
 router.post('/register-partner', authenticate, uploadPartnerDocs, controller.registerPartner);
 
+// [BARU] Admin Routes untuk Manajemen User
+router.get('/users', authenticate, controller.listAllUsers);
+router.patch('/users/:id/status', authenticate, controller.toggleUserStatus);
+
 module.exports = router;
