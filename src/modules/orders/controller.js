@@ -9,11 +9,12 @@ const UserVoucher = require('../vouchers/userVoucherModel');
 const User = require('../../models/User');
 const Earnings = require('../earnings/model');
 const env = require('../../config/env');
-const { getIO } = require('../chat/socket'); // [BARU] Import Socket Helper
+const { getIO } = require('../chat/socket'); 
 
 // [CONFIG] Default Timezone Configuration
 const DEFAULT_TIMEZONE = 'Asia/Jakarta';
 const DEFAULT_OFFSET = '+07:00'; 
+const BROADCAST_RADIUS_KM = 15; // Radius broadcast default (15 KM)
 
 // Helper: Konversi Date ke Date Components berdasarkan Timezone
 function getLocalDateComponents(dateInput, timeZone = DEFAULT_TIMEZONE) {
@@ -39,7 +40,7 @@ function getLocalDateComponents(dateInput, timeZone = DEFAULT_TIMEZONE) {
     return {
       dateOnly: `${getPart('year')}-${getPart('month')}-${getPart('day')}`,
       timeStr: `${getPart('hour')}:${getPart('minute')}`,
-      fullDate: date // Object Date asli (UTC)
+      fullDate: date 
     };
   } catch (error) {
     console.error(`Invalid Timezone: ${timeZone}`, error);
@@ -47,7 +48,7 @@ function getLocalDateComponents(dateInput, timeZone = DEFAULT_TIMEZONE) {
   }
 }
 
-// [NEW HELPER] Cek apakah provider punya order yang sedang berjalan
+// Helper: Cek apakah provider punya order yang sedang berjalan
 async function getProviderActiveOrderCount(providerId) {
   const activeStatuses = ['accepted', 'on_the_way', 'working'];
   const count = await Order.countDocuments({
@@ -57,28 +58,96 @@ async function getProviderActiveOrderCount(providerId) {
   return count;
 }
 
-// [NEW HELPER] Centralized Earnings Logic (Untuk manual & auto complete)
+// [BARU] HELPER BROADCAST GEO-SPASIAL
+async function broadcastBasicOrderToNearbyProviders(order) {
+  try {
+    const io = getIO();
+    if (!io) return;
+
+    // Pastikan order punya lokasi valid
+    if (!order.location || !order.location.coordinates || order.location.coordinates.length !== 2) {
+        console.warn(`[BROADCAST] Order ${order._id} tidak memiliki lokasi valid.`);
+        return;
+    }
+
+    const [longitude, latitude] = order.location.coordinates;
+    const requiredServiceIds = order.items.map(item => item.serviceId);
+
+    // Cari Provider yang:
+    // 1. Lokasinya dalam radius X km
+    // 2. Memiliki salah satu layanan yang diminta (dan aktif)
+    // 3. Status provider 'isAvailable' (Online)
+    // 4. Akun User-nya aktif
+    const nearbyProviders = await Provider.find({
+      location: {
+        $near: {
+          $geometry: {
+            type: "Point",
+            coordinates: [longitude, latitude]
+          },
+          $maxDistance: BROADCAST_RADIUS_KM * 1000 // Convert km to meters
+        }
+      },
+      isAvailable: true, // Provider sedang "Online" switch-nya
+      'services': {
+        $elemMatch: {
+          serviceId: { $in: requiredServiceIds },
+          isActive: true
+        }
+      }
+    }).populate('userId', 'fullName fcmToken'); // Populate userId untuk dapatkan socket room ID / FCM Token
+
+    console.log(`[BROADCAST] Found ${nearbyProviders.length} providers near order ${order._id}`);
+
+    // Emit ke setiap provider yang memenuhi syarat
+    // Asumsi: Room socket provider menggunakan User ID mereka
+    let broadcastCount = 0;
+    
+    for (const provider of nearbyProviders) {
+      if (provider.userId) {
+        // Cek double check: Apakah provider ini sedang sibuk? (Opsional, bisa di-skip jika ingin agresif)
+        // const activeJobs = await getProviderActiveOrderCount(provider._id);
+        // if (activeJobs > 0) continue; 
+
+        io.to(provider.userId._id.toString()).emit('order_new', {
+          message: 'Ada pesanan baru di sekitar Anda!',
+          order: {
+            ...order.toObject(),
+            distance: 'Dekat lokasi Anda' // Bisa hitung real distance jika perlu
+          }
+        });
+        broadcastCount++;
+      }
+    }
+    
+    console.log(`[BROADCAST] Successfully emitted to ${broadcastCount} providers.`);
+
+  } catch (error) {
+    console.error('[BROADCAST ERROR]', error);
+  }
+}
+
+// Helper: Centralized Earnings Logic
 async function calculateAndProcessEarnings(order) {
-  const settings = await Settings.findOne({ key: 'global_config' });
-  const platformCommissionPercent = settings ? settings.platformCommissionPercent : 12;
+  let platformCommissionPercent;
   
-  // 1. Hitung total additional fees yang statusnya 'paid'
+  if (order.appliedCommissionPercent != null) {
+    platformCommissionPercent = order.appliedCommissionPercent;
+  } else {
+    const settings = await Settings.findOne({ key: 'global_config' });
+    platformCommissionPercent = settings ? settings.platformCommissionPercent : 12;
+  }
+  
   const totalAdditionalFees = order.additionalFees
     ? order.additionalFees
         .filter(fee => fee.status === 'paid')
         .reduce((sum, fee) => sum + fee.amount, 0)
     : 0;
 
-  // 2. Hitung Revenue Dasar (Total Awal + Add-on - Admin Fee)
   const serviceRevenue = (order.totalAmount + totalAdditionalFees) - order.adminFee;
-
-  // 3. Hitung Komisi Platform
   const platformCommissionAmount = (serviceRevenue * platformCommissionPercent) / 100;
-
-  // 4. Hitung Earnings Bersih Provider
   const earningsAmount = serviceRevenue - platformCommissionAmount;
 
-  // 5. Update Saldo User Provider
   const providerDoc = await Provider.findById(order.providerId);
   if (!providerDoc) {
     throw new Error('Data mitra (provider) tidak ditemukan saat memproses earnings.');
@@ -94,7 +163,6 @@ async function calculateAndProcessEarnings(order) {
     throw new Error('Data user mitra tidak ditemukan.');
   }
 
-  // 6. Catat di earnings history
   const earningsRecord = new Earnings({
     providerId: providerDoc._id,
     userId: providerDoc.userId,
@@ -114,11 +182,6 @@ async function calculateAndProcessEarnings(order) {
   return {
     earnings: {
       totalAmount: order.totalAmount,
-      additionalFeeAmount: totalAdditionalFees,
-      adminFee: order.adminFee,
-      serviceRevenue: serviceRevenue,
-      platformCommissionPercent: platformCommissionPercent,
-      platformCommissionAmount: Math.round(platformCommissionAmount),
       earningsAmount: Math.round(earningsAmount)
     },
     providerBalance: providerUser.balance
@@ -165,7 +228,7 @@ async function listOrders(req, res, next) {
   }
 }
 
-// 2. CREATE ORDER
+// 2. CREATE ORDER (UPDATED WITH BROADCAST)
 async function createOrder(req, res, next) {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -197,10 +260,9 @@ async function createOrder(req, res, next) {
       return res.status(400).json({ message: 'Items tidak boleh kosong' });
     }
 
-    // --- [FIX] FETCH PROVIDER DATA UNTUK DIRECT ORDER ---
     let providerData = null;
     let providerSnapshot = {};
-    let providerUserId = null; // Untuk notifikasi socket
+    let providerUserId = null; 
 
     if (orderType === 'direct') {
       if (!providerId) {
@@ -229,7 +291,6 @@ async function createOrder(req, res, next) {
       }
     }
 
-    // --- [OPTIMIZED] FETCH SERVICES SEKALI JALAN ---
     const serviceIds = items.map(item => item.serviceId).filter(Boolean);
     const foundServices = await Service.find({ _id: { $in: serviceIds } }).session(session);
     
@@ -250,16 +311,11 @@ async function createOrder(req, res, next) {
       const quantity = parseInt(item.quantity) || 1;
       let realPrice;
 
-      // --- [FIX UTAMA] PRICING LOGIC UNTUK DIRECT ORDER ---
-      // Prioritaskan harga dari Provider jika Direct Order
       if (orderType === 'direct' && providerData) {
-        // Cari layanan ini di daftar layanan provider
-        // Pastikan konversi ke string agar pembandingan ID akurat
         const providerService = providerData.services.find(
           ps => ps.serviceId && ps.serviceId.toString() === item.serviceId.toString()
         );
 
-        // Validasi: Apakah Provider benar-benar menyediakan layanan ini DAN aktif?
         if (!providerService || !providerService.isActive) {
           await session.abortTransaction();
           return res.status(400).json({ 
@@ -269,7 +325,6 @@ async function createOrder(req, res, next) {
 
         realPrice = providerService.price;
       } else {
-        // Jika Basic Order, gunakan harga dasar dari master Service
         realPrice = serviceDoc.price || serviceDoc.basePrice;
       }
 
@@ -287,14 +342,13 @@ async function createOrder(req, res, next) {
     
     const settings = await Settings.findOne({ key: 'global_config' }).session(session);
     const adminFee = settings ? settings.adminFee : 2500;
+    const platformCommissionPercent = settings ? settings.platformCommissionPercent : 12;
 
-    // --- [FIXED] VOUCHER LOGIC WITH ATOMIC TRANSACTION ---
     let discountAmount = 0;
     let voucherId = null;
     let lockedUserVoucher = null; 
 
     if (voucherCode) {
-      // 1. Cari Master Voucher dulu untuk memastikan kode valid
       const masterVoucher = await Voucher.findOne({ 
         code: voucherCode.toUpperCase() 
       }).session(session);
@@ -304,7 +358,6 @@ async function createOrder(req, res, next) {
         return res.status(404).json({ message: 'Kode voucher tidak valid.' });
       }
 
-      // 2. Cari UserVoucher spesifik berdasarkan voucherId yang ditemukan
       const userVoucher = await UserVoucher.findOne({ 
         userId,
         voucherId: masterVoucher._id,
@@ -387,7 +440,6 @@ async function createOrder(req, res, next) {
 
     const finalTotalAmount = servicesSubtotal + adminFee - discountAmount;
 
-    // --- VALIDASI JADWAL UNTUK DIRECT ORDER ---
     if (orderType === 'direct' && providerData) {
       const targetTimeZone = providerData.timeZone || DEFAULT_TIMEZONE;
       const targetOffset = providerData.timeZoneOffset || DEFAULT_OFFSET;
@@ -439,7 +491,6 @@ async function createOrder(req, res, next) {
       }
     }
 
-    // --- CREATE DB DOCUMENT ---
     const order = new Order({ 
       userId, 
       providerId: orderType === 'direct' ? providerId : null,
@@ -448,6 +499,8 @@ async function createOrder(req, res, next) {
       
       totalAmount: Math.floor(finalTotalAmount),
       adminFee: adminFee,
+      appliedCommissionPercent: platformCommissionPercent,
+      
       discountAmount: Math.floor(discountAmount),
       voucherId: voucherId,
 
@@ -474,14 +527,22 @@ async function createOrder(req, res, next) {
 
     await session.commitTransaction();
 
-    // [BARU] SOCKET EMISSION FOR NEW ORDER
+    // --- SOCKET NOTIFICATION LOGIC ---
     const io = getIO();
+    
+    // Skenario 1: Direct Order -> Notify specific provider
     if (io && orderType === 'direct' && providerUserId) {
-        // Emit ke user provider spesifik
         io.to(providerUserId.toString()).emit('order_new', {
             message: 'Anda menerima pesanan baru!',
             order: order.toObject()
         });
+    }
+
+    // Skenario 2: Basic Order -> Broadcast to nearby providers
+    // [PERBAIKAN] Panggil fungsi broadcast yang baru
+    if (orderType === 'basic') {
+        // Jangan await agar response ke user cepat (Fire & Forget)
+        broadcastBasicOrderToNearbyProviders(order);
     }
 
     res.status(201).json({ 
@@ -539,18 +600,34 @@ async function listIncomingOrders(req, res, next) {
       .filter(s => s.isActive)
       .map(s => s.serviceId.toString());
     
-    // [FIXED] CEK APAKAH PROVIDER SUDAH PUNYA ORDER YANG SEDANG BERJALAN
     const activeOrderCount = await getProviderActiveOrderCount(provider._id);
     
+    // [UPDATE] Filter Basic Orders menggunakan Geo-Spatial (Radius 15KM)
+    // Jika provider melihat list ini, kita filter agar hanya yang dekat saja yang muncul
+    
+    let geoFilter = {};
+    if (provider.location && provider.location.coordinates) {
+       geoFilter = {
+         location: {
+           $near: {
+             $geometry: {
+               type: "Point",
+               coordinates: provider.location.coordinates
+             },
+             $maxDistance: BROADCAST_RADIUS_KM * 1000 // 15 KM
+           }
+         }
+       };
+    }
+
     const orders = await Order.find({
       $or: [
-        // Basic order hanya ditampilkan jika provider TIDAK ADA yang lagi dikerjakan
         { 
           orderType: 'basic', 
           status: 'searching',
           providerId: null, 
           'items.serviceId': { $in: myServiceIds },
-          // Hanya tampilkan jika provider tidak punya order aktif
+          ...geoFilter, // Tambahkan filter lokasi
           $expr: { $eq: [activeOrderCount, 0] }
         },
         { 
@@ -564,7 +641,6 @@ async function listIncomingOrders(req, res, next) {
     .sort({ scheduledAt: 1 })
     .lean();
 
-    // [NEW] Jika provider sudah punya order aktif, filter basic orders
     let filteredOrders = orders;
     if (activeOrderCount > 0) {
       filteredOrders = orders.filter(o => o.orderType !== 'basic' || o.status === 'paid');
@@ -583,7 +659,7 @@ async function listIncomingOrders(req, res, next) {
   }
 }
 
-// 5. ACCEPT ORDER (RACE CONDITION FIXED & REALTIME)
+// 5. ACCEPT ORDER
 async function acceptOrder(req, res, next) {
   try {
     const { orderId } = req.params;
@@ -594,14 +670,11 @@ async function acceptOrder(req, res, next) {
       return res.status(403).json({ message: 'Akses ditolak.' });
     }
 
-    // [FIX] Cek order dulu untuk menentukan jenis (tanpa lock, hanya baca)
     const orderCheck = await Order.findById(orderId).lean();
     if (!orderCheck) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan.' });
     }
 
-    // [FIXED] CEK APAKAH PROVIDER SUDAH PUNYA ORDER YANG SEDANG BERJALAN
-    // Jika ini basic order dan provider sudah punya order aktif, tolak
     if (orderCheck.orderType === 'basic') {
       const activeOrderCount = await getProviderActiveOrderCount(provider._id);
       if (activeOrderCount > 0) {
@@ -611,19 +684,13 @@ async function acceptOrder(req, res, next) {
         });
       }
     }
-
-    // [ATOMIC UPDATE] Mencegah Race Condition
-    // Kita gunakan findOneAndUpdate dengan kondisi status yang spesifik.
-    // Jika status sudah berubah (misal diambil provider lain), query ini akan gagal (return null).
     
     let queryCondition = { _id: orderId };
     
     if (orderCheck.orderType === 'basic') {
-        // Untuk Basic Order: Status harus 'searching' dan providerId masih null
         queryCondition.status = 'searching';
         queryCondition.providerId = null;
     } else if (orderCheck.orderType === 'direct') {
-        // Untuk Direct Order: Status harus 'paid' dan providerId harus sesuai
         queryCondition.status = 'paid';
         queryCondition.providerId = provider._id;
     } else {
@@ -635,23 +702,20 @@ async function acceptOrder(req, res, next) {
         { 
             $set: { 
                 status: 'accepted',
-                providerId: provider._id // Pastikan terisi (untuk basic order)
+                providerId: provider._id 
             } 
         },
-        { new: true } // Return dokumen setelah update
+        { new: true } 
     ).populate('userId', 'fullName');
 
     if (!updatedOrder) {
-        // Jika return null, berarti kondisi query tidak terpenuhi (sudah diambil orang atau status berubah)
         return res.status(409).json({ 
             message: 'Gagal menerima pesanan. Pesanan mungkin sudah diambil mitra lain atau status telah berubah.' 
         });
     }
 
-    // [BARU] SOCKET EMISSION FOR ORDER ACCEPTED
     const io = getIO();
     if (io) {
-        // Emit ke customer
         io.to(updatedOrder.userId._id.toString()).emit('order_status_update', {
             orderId: updatedOrder._id,
             status: 'accepted',
@@ -666,7 +730,7 @@ async function acceptOrder(req, res, next) {
   }
 }
 
-// 6. UPDATE ORDER STATUS (REALTIME)
+// 6. UPDATE ORDER STATUS
 async function updateOrderStatus(req, res, next) {
   try {
     const { orderId } = req.params;
@@ -685,7 +749,6 @@ async function updateOrderStatus(req, res, next) {
       return res.status(403).json({ message: 'Anda tidak memiliki akses ke pesanan ini' });
     }
 
-    // [FIX] Update untuk Provider: Set Waiting Approval
     if (status === 'waiting_approval' && isProvider) {
       if (order.status !== 'working') {
         return res.status(400).json({ 
@@ -700,11 +763,9 @@ async function updateOrderStatus(req, res, next) {
       }
 
       order.status = 'waiting_approval';
-      // [NEW] Set timestamp for auto-completion
       order.waitingApprovalAt = new Date();
       await order.save();
       
-      // [BARU] SOCKET EMIT
       const io = getIO();
       if(io) {
           io.to(order.userId._id.toString()).emit('order_status_update', {
@@ -721,7 +782,6 @@ async function updateOrderStatus(req, res, next) {
       });
     }
 
-    // [FIX] Update untuk Customer: Set Completed & Calculate Earnings
     if (status === 'completed' && isCustomer) {
       if (order.status !== 'waiting_approval') {
         return res.status(400).json({ 
@@ -732,13 +792,10 @@ async function updateOrderStatus(req, res, next) {
       try {
         const result = await calculateAndProcessEarnings(order);
         
-        // Update order status after successful earnings calculation
         order.status = 'completed';
-        // Clear waiting timestamp to stop cron
         order.waitingApprovalAt = null; 
         await order.save();
 
-        // [BARU] SOCKET EMIT
         const io = getIO();
         if(io && order.providerId) {
             io.to(order.providerId.userId._id.toString()).emit('order_status_update', {
@@ -791,7 +848,6 @@ async function updateOrderStatus(req, res, next) {
       order.status = status;
       await order.save();
 
-      // [BARU] SOCKET EMIT
       const io = getIO();
       if(io) {
           const statusMsg = status === 'on_the_way' ? 'Mitra sedang dalam perjalanan!' : 'Mitra mulai bekerja!';
@@ -818,7 +874,6 @@ async function updateOrderStatus(req, res, next) {
       order.status = 'cancelled';
       await order.save();
 
-      // [BARU] SOCKET EMIT
       const io = getIO();
       if(io) {
           const targetId = isProvider ? order.userId._id.toString() : order.providerId?.userId._id.toString();
@@ -860,12 +915,10 @@ async function requestAdditionalFee(req, res, next) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
     }
 
-    // Pastikan yang request adalah provider yang menangani order ini
     if (!order.providerId || !provider || order.providerId.toString() !== provider._id.toString()) {
       return res.status(403).json({ message: 'Anda tidak memiliki akses untuk request biaya tambahan pada order ini.' });
     }
 
-    // Hanya bisa request jika status 'working'
     if (order.status !== 'working') {
       return res.status(400).json({ message: 'Biaya tambahan hanya bisa diajukan saat status "working".' });
     }
@@ -905,18 +958,16 @@ async function uploadCompletionEvidence(req, res, next) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
     }
 
-    // Pastikan yang upload adalah provider yang menangani
     if (!order.providerId || !provider || order.providerId.toString() !== provider._id.toString()) {
       return res.status(403).json({ message: 'Anda tidak memiliki akses untuk upload bukti pekerjaan ini.' });
     }
 
-    // Hanya bisa upload jika status 'working'
     if (order.status !== 'working') {
       return res.status(400).json({ message: 'Bukti pekerjaan hanya bisa diupload saat status "working".' });
     }
 
     const evidence = {
-      url: `/uploads/${req.file.filename}`, // Sesuaikan path statis
+      url: `/uploads/${req.file.filename}`,
       type: 'photo',
       description: req.body.description || 'Bukti penyelesaian pekerjaan',
       uploadedAt: new Date()
@@ -944,7 +995,6 @@ async function rejectAdditionalFee(req, res, next) {
     const order = await Order.findById(orderId);
     if (!order) return res.status(404).json({ message: 'Order not found' });
 
-    // Pastikan yang menolak adalah customer pemilik order
     if (order.userId.toString() !== userId) {
       return res.status(403).json({ message: 'Unauthorized' });
     }
@@ -965,18 +1015,15 @@ async function rejectAdditionalFee(req, res, next) {
   }
 }
 
-// 10. [NEW] AUTO COMPLETE STUCK ORDERS (CRON JOB)
+// 10. AUTO COMPLETE STUCK ORDERS (CRON JOB)
 async function autoCompleteStuckOrders(req, res, next) {
   try {
-    // 1. Validasi Keamanan (Secure Cron)
     const secretKey = req.headers['x-cron-secret'];
     if (secretKey !== env.cronSecret) {
         console.error('[CRON] Unauthorized attempt to trigger auto-complete');
         return res.status(403).json({ message: 'Forbidden: Invalid Cron Secret' });
     }
 
-    // 2. Cari order yang stuck
-    // Criteria: Status 'waiting_approval' AND waitingApprovalAt > 48 jam yang lalu
     const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
     
     const stuckOrders = await Order.find({
@@ -996,8 +1043,7 @@ async function autoCompleteStuckOrders(req, res, next) {
         await calculateAndProcessEarnings(order);
         
         order.status = 'completed';
-        order.waitingApprovalAt = null; // Clear timestamp
-        // Optional: Add note that this was auto-completed
+        order.waitingApprovalAt = null; 
         order.orderNote = (order.orderNote || '') + '\n[SYSTEM] Auto-completed due to inactivity.';
         
         await order.save();

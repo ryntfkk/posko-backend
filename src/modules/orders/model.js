@@ -101,6 +101,11 @@ const orderSchema = new mongoose.Schema(
       type: Number,
       default: 0
     },
+    // [PERBAIKAN] Menyimpan snapshot komisi platform saat order dibuat (Integrity Fix)
+    appliedCommissionPercent: {
+      type: Number,
+      default: null
+    },
     voucherId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Voucher',

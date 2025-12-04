@@ -1,107 +1,101 @@
 const mongoose = require('mongoose');
 
+const providerServiceSchema = new mongoose.Schema({
+  serviceId: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'Service',
+    required: true 
+  },
+  price: { 
+    type: Number, 
+    required: true 
+  },
+  isActive: { 
+    type: Boolean, 
+    default: true 
+  },
+  description: {
+    type: String,
+    default: ''
+  }
+});
+
 const providerSchema = new mongoose.Schema(
   {
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
+      unique: true
     },
-    // Services menyimpan detail harga & referensi ke Katalog
-    services: [
-      {
-        serviceId: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: 'Service',
-          required: true,
-        },
-        price: {
-          type: Number,
-          required: true,
-        },
-        isActive: {
-          type: Boolean,
-          default: true,
-        },
-      },
-    ],
+    bio: {
+      type: String,
+      maxlength: 500
+    },
     rating: {
       type: Number,
       default: 0,
-    },
-    // Status Online/Offline global (misal untuk mematikan akun sementara)
-    isOnline: {
-      type: Boolean,
-      default: true,
-    },
-    // Daftar Tanggal Libur / Tidak Tersedia (Manual Block)
-    blockedDates: {
-      type: [Date],
-      default: [],
       index: true
     },
-    // Portfolio/Dokumentasi - Gambar hasil kerja mitra
-    portfolioImages: {
-      type: [String], // Array of image URLs
-      default: [],
-    },
-    // Total pesanan selesai untuk statistik
-    totalCompletedOrders: {
+    reviewCount: {
       type: Number,
-      default: 0,
+      default: 0
     },
-    // Status Verifikasi Mitra
-    verificationStatus: {
-      type: String,
-      enum: ['pending', 'verified', 'rejected', 'suspended'],
-      default: 'pending',
-      index: true
+    services: [providerServiceSchema],
+    
+    // [UPDATE] Lokasi untuk Geospatial Query
+    location: {
+      type: {
+        type: String,
+        enum: ['Point'],
+        default: 'Point',
+      },
+      coordinates: {
+        type: [Number],
+        default: [0, 0], // [Longitude, Latitude]
+      },
+      address: {
+        type: String,
+        default: ''
+      }
     },
-    // [BARU] Informasi Personal Mendalam
-    personalInfo: {
-      nik: { type: String, default: '' },
-      dateOfBirth: { type: Date },
-      gender: { type: String, enum: ['Laki-laki', 'Perempuan'], default: 'Laki-laki' }
+
+    isVerified: {
+      type: Boolean,
+      default: false
     },
-    // [BARU] Alamat Domisili (Bisa beda dengan KTP)
-    domicileAddress: {
-      type: String,
-      default: ''
-    },
-    // [BARU] Informasi Rekening Bank (Untuk Pencairan Dana)
+    documents: [{
+      type: { type: String }, 
+      url: { type: String },
+      status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' }
+    }],
     bankAccount: {
-      bankName: { type: String, default: '' },
-      accountNumber: { type: String, default: '' },
-      accountHolderName: { type: String, default: '' }
+      bankName: { type: String },
+      accountNumber: { type: String },
+      accountHolder: { type: String }
     },
-    // [BARU] Kontak Darurat
-    emergencyContact: {
-      name: { type: String, default: '' },
-      relationship: { type: String, default: '' },
-      phoneNumber: { type: String, default: '' }
+    
+    // Konfigurasi Ketersediaan
+    isAvailable: {
+      type: Boolean,
+      default: true // Toggle manual oleh provider (Online/Offline)
     },
-    // Dokumen Pendukung
-    documents: {
-      ktpUrl: { type: String, default: '' },
-      selfieKtpUrl: { type: String, default: '' },
-      skckUrl: { type: String, default: '' },
-      certificateUrl: { type: String, default: '' }
+    workingHours: {
+      start: { type: String, default: '08:00' },
+      end: { type: String, default: '17:00' }
     },
-    // Detail Tambahan
-    details: {
-      experienceYears: { type: Number, default: 0 },
-      description: { type: String, default: '' }, // Bio profesional / keahlian
-      serviceCategory: { type: String, default: '' }, // Kategori utama
-      vehicleType: { type: String, default: '' } // Jenis kendaraan (jika ada)
-    },
-    // Alasan Penolakan (Jika rejected)
-    rejectionReason: {
-      type: String,
-      default: ''
-    }
+    blockedDates: [Date],
+    timeZone: { type: String, default: 'Asia/Jakarta' },
+    timeZoneOffset: { type: String, default: '+07:00' }
   },
   { timestamps: true }
 );
+
+// [CRITICAL] Index Geo-Spatial untuk pencarian jarak ("Show me providers near X")
+providerSchema.index({ location: '2dsphere' });
+
+// Index untuk performa query layanan
+providerSchema.index({ 'services.serviceId': 1, 'services.isActive': 1 });
 
 const Provider = mongoose.model('Provider', providerSchema);
 
