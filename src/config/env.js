@@ -79,7 +79,7 @@ function getCorsOrigins() {
 
 const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
-  port: Number(process.env.PORT) || 3000,
+  port: Number(process.env.PORT) || 4000,
   mongoUri: process.env.MONGO_URI,
   jwtSecret: process.env.JWT_SECRET,
   jwtRefreshSecret: process.env.JWT_REFRESH_SECRET,
@@ -96,6 +96,9 @@ const config = {
 
   // [NEW] CORS Origins Configuration
   corsOrigins: getCorsOrigins(),
+
+  // [NEW] Secret for Cron Jobs
+  cronSecret: process.env.CRON_SECRET || 'default_secret_please_change',
 };
 
 module.exports = config;

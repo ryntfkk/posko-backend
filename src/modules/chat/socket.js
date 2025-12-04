@@ -95,4 +95,13 @@ function initSocket(httpServer) {
   });
 }
 
-module.exports = { initSocket };
+// [BARU] Helper untuk mengambil instance IO di file lain (Controller)
+function getIO() {
+  if (!io) {
+    console.warn("⚠️ Socket.io not initialized!");
+    return null;
+  }
+  return io;
+}
+
+module.exports = { initSocket, getIO };

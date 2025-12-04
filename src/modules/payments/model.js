@@ -13,7 +13,6 @@ const paymentSchema = new mongoose.Schema(
     },
     method: {
       type: String,
-      // [PERBAIKAN] Tambahkan 'midtrans_snap' di sini
       enum: ['bank_transfer', 'credit_card', 'cash', 'midtrans_snap'],
       default: 'bank_transfer',
     },
@@ -22,6 +21,17 @@ const paymentSchema = new mongoose.Schema(
       enum: ['pending', 'paid', 'failed'],
       default: 'pending',
     },
+    // [NEW] Transaction Type: Membedakan pembayaran awal vs add-on
+    transactionType: {
+      type: String,
+      enum: ['initial', 'additional_fee'],
+      default: 'initial'
+    },
+    // [NEW] Reference to Additional Fee ID (jika transactionType === 'additional_fee')
+    feeId: {
+      type: String, // Simpan string ID subdocument additionalFees
+      default: null
+    }
   },
   { timestamps: true }
 );

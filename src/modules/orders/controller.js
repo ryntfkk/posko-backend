@@ -8,6 +8,8 @@ const Voucher = require('../vouchers/model');
 const UserVoucher = require('../vouchers/userVoucherModel');
 const User = require('../../models/User');
 const Earnings = require('../earnings/model');
+const env = require('../../config/env');
+const { getIO } = require('../chat/socket'); // [BARU] Import Socket Helper
 
 // [CONFIG] Default Timezone Configuration
 const DEFAULT_TIMEZONE = 'Asia/Jakarta';
@@ -198,6 +200,7 @@ async function createOrder(req, res, next) {
     // --- [FIX] FETCH PROVIDER DATA UNTUK DIRECT ORDER ---
     let providerData = null;
     let providerSnapshot = {};
+    let providerUserId = null; // Untuk notifikasi socket
 
     if (orderType === 'direct') {
       if (!providerId) {
@@ -216,6 +219,7 @@ async function createOrder(req, res, next) {
       }
 
       if (providerData.userId) {
+        providerUserId = providerData.userId._id;
         providerSnapshot = {
           fullName: providerData.userId.fullName,
           profilePictureUrl: providerData.userId.profilePictureUrl,
@@ -470,6 +474,16 @@ async function createOrder(req, res, next) {
 
     await session.commitTransaction();
 
+    // [BARU] SOCKET EMISSION FOR NEW ORDER
+    const io = getIO();
+    if (io && orderType === 'direct' && providerUserId) {
+        // Emit ke user provider spesifik
+        io.to(providerUserId.toString()).emit('order_new', {
+            message: 'Anda menerima pesanan baru!',
+            order: order.toObject()
+        });
+    }
+
     res.status(201).json({ 
       message: 'Pesanan berhasil dibuat', 
       data: {
@@ -569,7 +583,7 @@ async function listIncomingOrders(req, res, next) {
   }
 }
 
-// 5. ACCEPT ORDER
+// 5. ACCEPT ORDER (RACE CONDITION FIXED & REALTIME)
 async function acceptOrder(req, res, next) {
   try {
     const { orderId } = req.params;
@@ -580,27 +594,15 @@ async function acceptOrder(req, res, next) {
       return res.status(403).json({ message: 'Akses ditolak.' });
     }
 
-    const order = await Order.findById(orderId);
-    if (!order) {
+    // [FIX] Cek order dulu untuk menentukan jenis (tanpa lock, hanya baca)
+    const orderCheck = await Order.findById(orderId).lean();
+    if (!orderCheck) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan.' });
-    }
-
-    const validStatuses = ['searching', 'paid'];
-    if (!validStatuses.includes(order.status)) {
-      return res.status(400).json({ 
-        message: 'Pesanan ini sudah tidak tersedia, sudah diambil, atau belum dibayar.' 
-      });
-    }
-
-    if (order.orderType === 'basic' && order.status !== 'searching') {
-      return res.status(400).json({ 
-        message: 'Basic order harus dalam status "searching" untuk diterima.' 
-      });
     }
 
     // [FIXED] CEK APAKAH PROVIDER SUDAH PUNYA ORDER YANG SEDANG BERJALAN
     // Jika ini basic order dan provider sudah punya order aktif, tolak
-    if (order.orderType === 'basic') {
+    if (orderCheck.orderType === 'basic') {
       const activeOrderCount = await getProviderActiveOrderCount(provider._id);
       if (activeOrderCount > 0) {
         return res.status(400).json({ 
@@ -610,85 +612,77 @@ async function acceptOrder(req, res, next) {
       }
     }
 
-    if (order.orderType === 'direct') {
-      if (order.status !== 'paid') {
-        return res.status(400).json({ 
-          message: 'Direct order harus sudah dibayar untuk diterima.' 
-        });
-      }
-      if (order.providerId && order.providerId.toString() !== provider._id.toString()) {
-        return res.status(403).json({ 
-          message: 'Order ini ditujukan untuk mitra lain.' 
-        });
-      }
+    // [ATOMIC UPDATE] Mencegah Race Condition
+    // Kita gunakan findOneAndUpdate dengan kondisi status yang spesifik.
+    // Jika status sudah berubah (misal diambil provider lain), query ini akan gagal (return null).
+    
+    let queryCondition = { _id: orderId };
+    
+    if (orderCheck.orderType === 'basic') {
+        // Untuk Basic Order: Status harus 'searching' dan providerId masih null
+        queryCondition.status = 'searching';
+        queryCondition.providerId = null;
+    } else if (orderCheck.orderType === 'direct') {
+        // Untuk Direct Order: Status harus 'paid' dan providerId harus sesuai
+        queryCondition.status = 'paid';
+        queryCondition.providerId = provider._id;
+    } else {
+        return res.status(400).json({ message: 'Tipe order tidak valid.' });
     }
 
-    order.status = 'accepted';
-    order.providerId = provider._id;
-    await order.save();
+    const updatedOrder = await Order.findOneAndUpdate(
+        queryCondition,
+        { 
+            $set: { 
+                status: 'accepted',
+                providerId: provider._id // Pastikan terisi (untuk basic order)
+            } 
+        },
+        { new: true } // Return dokumen setelah update
+    ).populate('userId', 'fullName');
 
-    res.json({ message: 'Pesanan berhasil diterima! Segera hubungi pelanggan.', data: order });
+    if (!updatedOrder) {
+        // Jika return null, berarti kondisi query tidak terpenuhi (sudah diambil orang atau status berubah)
+        return res.status(409).json({ 
+            message: 'Gagal menerima pesanan. Pesanan mungkin sudah diambil mitra lain atau status telah berubah.' 
+        });
+    }
+
+    // [BARU] SOCKET EMISSION FOR ORDER ACCEPTED
+    const io = getIO();
+    if (io) {
+        // Emit ke customer
+        io.to(updatedOrder.userId._id.toString()).emit('order_status_update', {
+            orderId: updatedOrder._id,
+            status: 'accepted',
+            message: 'Mitra telah menerima pesanan Anda!',
+            order: updatedOrder
+        });
+    }
+
+    res.json({ message: 'Pesanan berhasil diterima! Segera hubungi pelanggan.', data: updatedOrder });
   } catch (error) {
     next(error);
   }
 }
 
-// 6. UPDATE ORDER STATUS
+// 6. UPDATE ORDER STATUS (REALTIME)
 async function updateOrderStatus(req, res, next) {
   try {
     const { orderId } = req.params;
     const { status } = req.body; 
     const userId = req.user.userId;
-    const { roles = [] } = req.user; // Ambil roles dari token
 
-    const order = await Order.findById(orderId);
+    const order = await Order.findById(orderId).populate('userId').populate({ path: 'providerId', populate: { path: 'userId' } });
     if (!order) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
     }
 
-    // [UPDATED] PERMISSION CHECK
-    const isCustomer = order.userId.toString() === userId;
-    const provider = await Provider.findOne({ userId }).lean();
-    const isProvider = order.providerId && provider && 
-                       order.providerId.toString() === provider._id.toString();
-    const isAdmin = roles.includes('admin'); // Cek jika user adalah admin
+    const isCustomer = order.userId._id.toString() === userId;
+    const isProvider = order.providerId && order.providerId.userId._id.toString() === userId;
 
-    // Izinkan akses jika Customer, Provider, ATAU Admin
-    if (!isCustomer && !isProvider && !isAdmin) {
+    if (!isCustomer && !isProvider) {
       return res.status(403).json({ message: 'Anda tidak memiliki akses ke pesanan ini' });
-    }
-
-    // --- ADMIN OVERRIDE LOGIC ---
-    if (isAdmin) {
-      // Admin bisa membatalkan order atau menyelesaikan order secara paksa
-      if (status === 'cancelled') {
-        order.status = 'cancelled';
-        order.orderNote = (order.orderNote || '') + '\n[ADMIN] Dibatalkan oleh Admin.';
-        await order.save();
-        return res.json({ message: 'Pesanan dibatalkan oleh Admin', data: order });
-      }
-
-      if (status === 'completed') {
-        // Coba hitung earnings, jika gagal tetap selesaikan status order
-        try {
-          // Hanya hitung earnings jika belum pernah selesai sebelumnya
-          const earningsCheck = await Earnings.findOne({ orderId: order._id });
-          if (!earningsCheck && order.providerId) {
-             await calculateAndProcessEarnings(order);
-          }
-        } catch (err) {
-          console.error('[ADMIN FORCE COMPLETE] Earnings Error:', err.message);
-        }
-        
-        order.status = 'completed';
-        order.waitingApprovalAt = null;
-        order.orderNote = (order.orderNote || '') + '\n[ADMIN] Diselesaikan paksa oleh Admin.';
-        await order.save();
-        return res.json({ message: 'Pesanan diselesaikan paksa oleh Admin', data: order });
-      }
-      
-      // Admin bisa mengubah status lain juga jika diperlukan, tapi hati-hati
-      // Untuk keamanan, sementara batasi Admin hanya Cancel/Complete atau fallback ke logic bawah
     }
 
     // [FIX] Update untuk Provider: Set Waiting Approval
@@ -710,6 +704,17 @@ async function updateOrderStatus(req, res, next) {
       order.waitingApprovalAt = new Date();
       await order.save();
       
+      // [BARU] SOCKET EMIT
+      const io = getIO();
+      if(io) {
+          io.to(order.userId._id.toString()).emit('order_status_update', {
+              orderId: order._id,
+              status: 'waiting_approval',
+              message: 'Pekerjaan selesai! Mohon konfirmasi pesanan.',
+              order
+          });
+      }
+
       return res.json({ 
         message: 'Pekerjaan ditandai selesai. Menunggu konfirmasi pelanggan.', 
         data: order 
@@ -732,6 +737,17 @@ async function updateOrderStatus(req, res, next) {
         // Clear waiting timestamp to stop cron
         order.waitingApprovalAt = null; 
         await order.save();
+
+        // [BARU] SOCKET EMIT
+        const io = getIO();
+        if(io && order.providerId) {
+            io.to(order.providerId.userId._id.toString()).emit('order_status_update', {
+                orderId: order._id,
+                status: 'completed',
+                message: 'Pesanan selesai! Dana telah diteruskan ke saldo Anda.',
+                order
+            });
+        }
 
         return res.json({ 
           message: 'Pesanan selesai! Terima kasih.', 
@@ -774,11 +790,23 @@ async function updateOrderStatus(req, res, next) {
       
       order.status = status;
       await order.save();
+
+      // [BARU] SOCKET EMIT
+      const io = getIO();
+      if(io) {
+          const statusMsg = status === 'on_the_way' ? 'Mitra sedang dalam perjalanan!' : 'Mitra mulai bekerja!';
+          io.to(order.userId._id.toString()).emit('order_status_update', {
+              orderId: order._id,
+              status: status,
+              message: statusMsg,
+              order
+          });
+      }
+
       return res.json({ message: `Status diubah menjadi ${status}`, data: order });
     }
 
     if (status === 'cancelled') {
-      // Customer logic cancellation
       const nonCancellableStatuses = ['completed', 'working', 'waiting_approval'];
       
       if (nonCancellableStatuses.includes(order.status)) {
@@ -789,6 +817,21 @@ async function updateOrderStatus(req, res, next) {
       
       order.status = 'cancelled';
       await order.save();
+
+      // [BARU] SOCKET EMIT
+      const io = getIO();
+      if(io) {
+          const targetId = isProvider ? order.userId._id.toString() : order.providerId?.userId._id.toString();
+          if(targetId) {
+              io.to(targetId).emit('order_status_update', {
+                  orderId: order._id,
+                  status: 'cancelled',
+                  message: 'Pesanan dibatalkan.',
+                  order
+              });
+          }
+      }
+
       return res.json({ message: 'Pesanan dibatalkan', data: order });
     }
 
@@ -925,9 +968,12 @@ async function rejectAdditionalFee(req, res, next) {
 // 10. [NEW] AUTO COMPLETE STUCK ORDERS (CRON JOB)
 async function autoCompleteStuckOrders(req, res, next) {
   try {
-    // 1. Validasi Keamanan Sederhana (Optional: Tambahkan Secret Header check)
-    // const cronSecret = req.headers['x-cron-secret'];
-    // if (cronSecret !== process.env.CRON_SECRET) return res.status(403).send('Unauthorized');
+    // 1. Validasi Keamanan (Secure Cron)
+    const secretKey = req.headers['x-cron-secret'];
+    if (secretKey !== env.cronSecret) {
+        console.error('[CRON] Unauthorized attempt to trigger auto-complete');
+        return res.status(403).json({ message: 'Forbidden: Invalid Cron Secret' });
+    }
 
     // 2. Cari order yang stuck
     // Criteria: Status 'waiting_approval' AND waitingApprovalAt > 48 jam yang lalu
