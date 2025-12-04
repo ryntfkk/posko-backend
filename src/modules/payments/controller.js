@@ -341,5 +341,25 @@ async function handleNotification(req, res, next) {
     res.status(500).json({ message: 'Internal Server Error' }); 
   }
 }
+// [PERBAIKAN] Tambahkan fungsi ini untuk Admin
+async function listAllPayments(req, res, next) {
+  try {
+    // Validasi Role Admin (Opsional, sesuaikan kebutuhan)
+    const { roles = [] } = req.user || {};
+    if (!roles.includes('admin')) {
+      return res.status(403).json({ message: 'Akses ditolak. Hanya admin.' });
+    }
 
-module.exports = { listPayments, createPayment, handleNotification };
+    const payments = await Payment.find()
+      .populate('orderId', 'orderNumber totalAmount status')
+      .sort({ createdAt: -1 });
+
+    res.json({
+      message: 'Semua data pembayaran berhasil diambil',
+      data: payments
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+module.exports = { listPayments, createPayment, handleNotification, listAllPayments };
