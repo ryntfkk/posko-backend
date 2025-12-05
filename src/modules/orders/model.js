@@ -106,6 +106,11 @@ const orderSchema = new mongoose.Schema(
       type: Number,
       default: null
     },
+    // [NEW] Flag untuk mencegah double earnings (Critical Fix)
+    isEarningsProcessed: {
+      type: Boolean,
+      default: false
+    },
     voucherId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Voucher',

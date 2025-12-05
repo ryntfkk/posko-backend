@@ -127,65 +127,104 @@ async function broadcastBasicOrderToNearbyProviders(order) {
   }
 }
 
-// Helper: Centralized Earnings Logic
-async function calculateAndProcessEarnings(order) {
-  let platformCommissionPercent;
-  
-  if (order.appliedCommissionPercent != null) {
-    platformCommissionPercent = order.appliedCommissionPercent;
-  } else {
-    const settings = await Settings.findOne({ key: 'global_config' });
-    platformCommissionPercent = settings ? settings.platformCommissionPercent : 12;
-  }
-  
-  const totalAdditionalFees = order.additionalFees
-    ? order.additionalFees
-        .filter(fee => fee.status === 'paid')
-        .reduce((sum, fee) => sum + fee.amount, 0)
-    : 0;
+// Helper: Centralized Earnings Logic (TRANSACTION & IDEMPOTENCY FIX)
+async function calculateAndProcessEarnings(orderId) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  const serviceRevenue = (order.totalAmount + totalAdditionalFees) - order.adminFee;
-  const platformCommissionAmount = (serviceRevenue * platformCommissionPercent) / 100;
-  const earningsAmount = serviceRevenue - platformCommissionAmount;
+  try {
+    // 1. Fetch Order terbaru di dalam session untuk memastikan data atomic
+    const order = await Order.findById(orderId).session(session);
+    
+    if (!order) {
+        throw new Error('Pesanan tidak ditemukan saat memproses earnings.');
+    }
 
-  const providerDoc = await Provider.findById(order.providerId);
-  if (!providerDoc) {
-    throw new Error('Data mitra (provider) tidak ditemukan saat memproses earnings.');
-  }
+    // 2. [IDEMPOTENCY CHECK] Cek apakah earnings sudah pernah diproses
+    if (order.isEarningsProcessed) {
+        console.warn(`[EARNINGS] Order ${order._id} already processed. Skipping.`);
+        await session.abortTransaction();
+        return {
+           alreadyProcessed: true,
+           message: 'Earnings already processed for this order.'
+        };
+    }
 
-  const providerUser = await User.findByIdAndUpdate(
-    providerDoc.userId, 
-    { $inc: { balance: earningsAmount } },
-    { new: true }
-  );
+    let platformCommissionPercent;
+    
+    if (order.appliedCommissionPercent != null) {
+      platformCommissionPercent = order.appliedCommissionPercent;
+    } else {
+      const settings = await Settings.findOne({ key: 'global_config' }).session(session);
+      platformCommissionPercent = settings ? settings.platformCommissionPercent : 12;
+    }
+    
+    const totalAdditionalFees = order.additionalFees
+      ? order.additionalFees
+          .filter(fee => fee.status === 'paid')
+          .reduce((sum, fee) => sum + fee.amount, 0)
+      : 0;
 
-  if (!providerUser) {
-    throw new Error('Data user mitra tidak ditemukan.');
-  }
+    const serviceRevenue = (order.totalAmount + totalAdditionalFees) - order.adminFee;
+    const platformCommissionAmount = (serviceRevenue * platformCommissionPercent) / 100;
+    const earningsAmount = serviceRevenue - platformCommissionAmount;
 
-  const earningsRecord = new Earnings({
-    providerId: providerDoc._id,
-    userId: providerDoc.userId,
-    orderId: order._id,
-    totalAmount: order.totalAmount,
-    additionalFeeAmount: totalAdditionalFees,
-    adminFee: order.adminFee,
-    platformCommissionPercent: platformCommissionPercent,
-    platformCommissionAmount: Math.round(platformCommissionAmount),
-    earningsAmount: Math.round(earningsAmount),
-    status: 'completed',
-    completedAt: new Date()
-  });
+    const providerDoc = await Provider.findById(order.providerId).session(session);
+    if (!providerDoc) {
+      throw new Error('Data mitra (provider) tidak ditemukan saat memproses earnings.');
+    }
 
-  await earningsRecord.save();
+    // 3. Update Saldo Mitra
+    const providerUser = await User.findByIdAndUpdate(
+      providerDoc.userId, 
+      { $inc: { balance: earningsAmount } },
+      { new: true, session: session }
+    );
 
-  return {
-    earnings: {
+    if (!providerUser) {
+      throw new Error('Data user mitra tidak ditemukan.');
+    }
+
+    // 4. Buat Record Earnings
+    const earningsRecord = new Earnings({
+      providerId: providerDoc._id,
+      userId: providerDoc.userId,
+      orderId: order._id,
       totalAmount: order.totalAmount,
-      earningsAmount: Math.round(earningsAmount)
-    },
-    providerBalance: providerUser.balance
-  };
+      additionalFeeAmount: totalAdditionalFees,
+      adminFee: order.adminFee,
+      platformCommissionPercent: platformCommissionPercent,
+      platformCommissionAmount: Math.round(platformCommissionAmount),
+      earningsAmount: Math.round(earningsAmount),
+      status: 'completed',
+      completedAt: new Date()
+    });
+
+    await earningsRecord.save({ session });
+
+    // 5. Update Status Order & Lock Earnings
+    order.status = 'completed';
+    order.waitingApprovalAt = null;
+    order.isEarningsProcessed = true; // Lock agar tidak bisa diproses ulang
+    await order.save({ session });
+
+    await session.commitTransaction();
+
+    return {
+      success: true,
+      earnings: {
+        totalAmount: order.totalAmount,
+        earningsAmount: Math.round(earningsAmount)
+      },
+      providerBalance: providerUser.balance
+    };
+
+  } catch (error) {
+    await session.abortTransaction();
+    throw error;
+  } finally {
+    session.endSession();
+  }
 }
 
 // 1. LIST ALL ORDERS
@@ -737,6 +776,7 @@ async function updateOrderStatus(req, res, next) {
     const { status } = req.body; 
     const userId = req.user.userId;
 
+    // Gunakan findById biasa dulu untuk pengecekan awal
     const order = await Order.findById(orderId).populate('userId').populate({ path: 'providerId', populate: { path: 'userId' } });
     if (!order) {
       return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
@@ -790,38 +830,39 @@ async function updateOrderStatus(req, res, next) {
       }
 
       try {
-        const result = await calculateAndProcessEarnings(order);
+        // [UPDATE] Panggil helper atomic earnings
+        const result = await calculateAndProcessEarnings(order._id);
         
-        order.status = 'completed';
-        order.waitingApprovalAt = null; 
-        await order.save();
+        // Fetch order ulang untuk mendapatkan status terbaru (terutama isEarningsProcessed)
+        const updatedOrder = await Order.findById(order._id);
 
         const io = getIO();
-        if(io && order.providerId) {
-            io.to(order.providerId.userId._id.toString()).emit('order_status_update', {
-                orderId: order._id,
+        if(io && updatedOrder.providerId) {
+            // Karena order sudah disimpan di helper, kita perlu ambil data user mitra lagi jika ingin emit socket
+            // Namun di helper kita populate providerDoc, tapi di sini 'order' awal masih valid untuk ID
+            // Safe bet: ambil user ID mitra dari object 'order' awal
+            const providerUserId = order.providerId.userId._id.toString();
+            
+            io.to(providerUserId).emit('order_status_update', {
+                orderId: updatedOrder._id,
                 status: 'completed',
                 message: 'Pesanan selesai! Dana telah diteruskan ke saldo Anda.',
-                order
+                order: updatedOrder
             });
         }
 
         return res.json({ 
           message: 'Pesanan selesai! Terima kasih.', 
           data: {
-            order: order,
+            order: updatedOrder,
             ...result
           }
         });
 
       } catch (earningsError) {
         console.error('❌ Error calculating earnings:', earningsError);
-        order.status = 'completed';
-        order.waitingApprovalAt = null;
-        await order.save();
         return res.status(500).json({ 
-          message: 'Pesanan selesai tapi ada error saat mencatat earnings', 
-          data: order,
+          message: 'Gagal menyelesaikan pesanan. Silakan coba lagi.', 
           error: earningsError.message 
         });
       }
@@ -1026,9 +1067,11 @@ async function autoCompleteStuckOrders(req, res, next) {
 
     const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
     
+    // Cari yang stuck DAN belum diproses earnings-nya
     const stuckOrders = await Order.find({
       status: 'waiting_approval',
-      waitingApprovalAt: { $lt: twoDaysAgo }
+      waitingApprovalAt: { $lt: twoDaysAgo },
+      isEarningsProcessed: { $ne: true } // Safety check
     });
 
     console.log(`[CRON] Found ${stuckOrders.length} stuck orders.`);
@@ -1040,13 +1083,16 @@ async function autoCompleteStuckOrders(req, res, next) {
       try {
         console.log(`[CRON] Auto-completing order: ${order._id}`);
         
-        await calculateAndProcessEarnings(order);
+        // Panggil fungsi atomic yang sudah diperbarui
+        await calculateAndProcessEarnings(order._id);
         
-        order.status = 'completed';
-        order.waitingApprovalAt = null; 
-        order.orderNote = (order.orderNote || '') + '\n[SYSTEM] Auto-completed due to inactivity.';
+        // Tambahkan catatan (dilakukan terpisah tidak masalah karena earnings sudah aman)
+        await Order.findByIdAndUpdate(order._id, {
+            $set: { 
+                orderNote: (order.orderNote || '') + '\n[SYSTEM] Auto-completed due to inactivity.' 
+            }
+        });
         
-        await order.save();
         successCount++;
       } catch (err) {
         console.error(`[CRON] Failed to auto-complete order ${order._id}:`, err.message);
