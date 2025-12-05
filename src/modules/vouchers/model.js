@@ -41,7 +41,12 @@ const voucherSchema = new mongoose.Schema({
     type: Number, 
     default: 0 
   },
-  // [BARU] Field untuk membatasi layanan spesifik
+  // [BARU] Field untuk gambar voucher
+  imageUrl: {
+    type: String,
+    default: ''
+  },
+  // Field untuk membatasi layanan spesifik
   // Jika array kosong [] = Berlaku untuk SEMUA layanan
   // Jika terisi = Hanya berlaku untuk Service ID yang ada di list
   applicableServices: [{

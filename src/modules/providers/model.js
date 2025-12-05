@@ -60,12 +60,26 @@ const providerSchema = new mongoose.Schema(
       }
     },
 
+    // [FIX] Mengganti isVerified (Boolean) dengan verificationStatus (String) agar sesuai Controller & Frontend
+    verificationStatus: {
+      type: String,
+      enum: ['pending', 'verified', 'rejected', 'suspended'],
+      default: 'pending',
+      index: true
+    },
+    rejectionReason: {
+      type: String,
+      default: ''
+    },
+
+    // Backward compatibility (opsional, bisa dihapus jika migrasi data sudah dilakukan)
     isVerified: {
       type: Boolean,
       default: false
     },
+
     documents: [{
-      type: { type: String }, 
+      type: { type: String }, // e.g., 'ktp', 'selfie', 'skck'
       url: { type: String },
       status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' }
     }],
@@ -86,16 +100,20 @@ const providerSchema = new mongoose.Schema(
     },
     blockedDates: [Date],
     timeZone: { type: String, default: 'Asia/Jakarta' },
-    timeZoneOffset: { type: String, default: '+07:00' }
+    timeZoneOffset: { type: String, default: '+07:00' },
+    
+    // Portfolio (Sesuai Controller updatePortfolio)
+    portfolioImages: [{ type: String }]
   },
   { timestamps: true }
 );
 
-// [CRITICAL] Index Geo-Spatial untuk pencarian jarak ("Show me providers near X")
+// [CRITICAL] Index Geo-Spatial untuk pencarian jarak
 providerSchema.index({ location: '2dsphere' });
 
-// Index untuk performa query layanan
+// Index performa
 providerSchema.index({ 'services.serviceId': 1, 'services.isActive': 1 });
+providerSchema.index({ verificationStatus: 1 });
 
 const Provider = mongoose.model('Provider', providerSchema);
 

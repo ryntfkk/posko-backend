@@ -444,10 +444,11 @@ async function verifyProvider(req, res, next) {
 
     await provider.save();
 
-    // Jika verified, pastikan role user juga 'provider' (jaga-jaga)
+    // Jika verified, pastikan role user juga 'provider' DAN switch activeRole
     if (status === 'verified') {
       await User.findByIdAndUpdate(provider.userId, {
-        $addToSet: { roles: 'provider' }
+        $addToSet: { roles: 'provider' },
+        activeRole: 'provider' // [TAMBAHAN] Paksa switch role agar login berikutnya langsung masuk dashboard
       });
     }
 

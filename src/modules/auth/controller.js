@@ -186,17 +186,23 @@ async function login(req, res, next) {
       });
     }
 
-    // [FIX] Ambil status provider jika user sedang login sebagai provider
+    // [FIX - UPDATE LOGIKA] 
+    // Selalu cek data provider terlepas dari activeRole.
+    // Ini memastikan user yang baru verified (tapi activeRole masih customer) tetap dapat statusnya di token.
     let providerStatus = null;
-    if (user.activeRole === 'provider') {
-      const provider = await Provider.findOne({ userId: user._id });
-      if (provider) {
-        providerStatus = provider.verificationStatus;
-      } else {
-        // Jika role di user 'provider' tapi data di collection Provider tidak ada (anomali),
-        // fallback kembalikan ke customer untuk keamanan
-        user.activeRole = 'customer';
-        await user.save();
+    const provider = await Provider.findOne({ userId: user._id });
+    
+    if (provider) {
+      providerStatus = provider.verificationStatus;
+      
+      // OPTIONAL: Auto-switch ke provider jika sudah verified tapi masih customer
+      // Ini menyelesaikan masalah redirect loop di frontend
+      if (providerStatus === 'verified' && user.activeRole === 'customer') {
+         user.activeRole = 'provider';
+         if (!user.roles.includes('provider')) {
+            user.roles.push('provider');
+         }
+         await user.save();
       }
     }
 
@@ -270,12 +276,11 @@ async function refreshToken(req, res, next) {
     }
 
     // [FIX] Fetch ulang status provider saat refresh token
+    // Gunakan logika yang sama: Cek provider existence, bukan cuma activeRole
     let providerStatus = null;
-    if (user.activeRole === 'provider') {
-      const provider = await Provider.findOne({ userId: user._id });
-      if (provider) {
-        providerStatus = provider.verificationStatus;
-      }
+    const provider = await Provider.findOne({ userId: user._id });
+    if (provider) {
+      providerStatus = provider.verificationStatus;
     }
 
     // Rotate Tokens
@@ -344,11 +349,10 @@ async function getProfile(req, res, next) {
     const safeUser = sanitizeUser(user);
 
     // [ADD] Inject provider verification status ke profile response
-    if (user.roles.includes('provider')) {
-        const provider = await Provider.findOne({ userId: user._id }).select('verificationStatus');
-        if (provider) {
-            safeUser.providerStatus = provider.verificationStatus;
-        }
+    // Selalu cek provider table jika user memiliki potensi role provider
+    const provider = await Provider.findOne({ userId: user._id }).select('verificationStatus');
+    if (provider) {
+        safeUser.providerStatus = provider.verificationStatus;
     }
 
     res.json({
