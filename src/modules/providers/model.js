@@ -54,9 +54,13 @@ const providerSchema = new mongoose.Schema(
         type: [Number],
         default: [0, 0], // [Longitude, Latitude]
       },
+      // [UPDATE] Mengubah address menjadi objek detail
       address: {
-        type: String,
-        default: ''
+        fullAddress: { type: String, default: '' },
+        district: { type: String, default: '' },
+        city: { type: String, default: '' },
+        province: { type: String, default: '' },
+        postalCode: { type: String, default: '' }
       }
     },
 

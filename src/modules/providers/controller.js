@@ -194,7 +194,6 @@ async function listProviders(req, res, next) {
         blockedDates: '$providerInfo.blockedDates',
         portfolioImages: '$providerInfo.portfolioImages',
         totalCompletedOrders: '$providerInfo.totalCompletedOrders',
-        // schedule: '$providerInfo.schedule', // [DIHAPUS] Tidak lagi dikirim
         createdAt: '$providerInfo.createdAt',
         distance: '$distance'
       }
@@ -248,7 +247,7 @@ async function getProviderById(req, res, next) {
     const providerData = provider.toObject();
     providerData.bookedDates = bookedDates;
     providerData.totalCompletedOrders = totalCompletedOrders;
-    delete providerData.schedule; // [DIHAPUS] Membersihkan output
+    delete providerData.schedule; 
 
     res.json({
       messageKey: 'providers.detail',
@@ -276,7 +275,7 @@ async function getProviderMe(req, res, next) {
     const providerData = provider.toObject();
     providerData.bookedDates = bookedDates;
     providerData.totalCompletedOrders = totalCompletedOrders;
-    delete providerData.schedule; // [DIHAPUS] Membersihkan output
+    delete providerData.schedule; 
 
     res.json({
       messageKey: 'providers.me',
@@ -422,11 +421,12 @@ async function toggleOnlineStatus(req, res, next) {
   }
 }
 
-// [BARU] Update Profil Provider (Bio, Alamat Operasional, Jam Kerja)
+// [FIXED] Update Profil Provider (Bio, Alamat Operasional, Jam Kerja)
 async function updateProviderProfile(req, res, next) {
   try {
     const userId = req.user.userId;
-    const { bio, address, latitude, longitude, workingHours } = req.body;
+    // [UPDATE] Menerima semua input field termasuk province
+    const { bio, fullAddress, province, district, city, postalCode, latitude, longitude, workingHours } = req.body;
 
     const provider = await Provider.findOne({ userId });
     if (!provider) {
@@ -436,13 +436,37 @@ async function updateProviderProfile(req, res, next) {
     // Update Bio
     if (bio !== undefined) provider.bio = bio;
 
-    // Update Lokasi & Alamat Operasional
-    if (address !== undefined) {
-        provider.location.address = address;
+    // [FIX] Logika Defensive Update Alamat Detail
+    // Pastikan provider.location terinisialisasi
+    if (!provider.location) {
+        provider.location = { type: 'Point', coordinates: [0, 0], address: {} };
     }
 
+    // 1. Ambil state alamat saat ini (bisa object atau string lama)
+    let currentAddr = {};
+    const existingAddress = provider.location.address;
+
+    if (existingAddress && typeof existingAddress === 'object') {
+        currentAddr = existingAddress; 
+    } else if (typeof existingAddress === 'string') {
+        // Migrasi data lama (String) ke format baru
+        currentAddr = { fullAddress: existingAddress };
+    }
+
+    // 2. Susun object alamat baru dengan menimpa data lama jika ada input baru
+    const newAddress = {
+        fullAddress: fullAddress !== undefined ? fullAddress : (currentAddr.fullAddress || ''),
+        province: province !== undefined ? province : (currentAddr.province || ''),
+        city: city !== undefined ? city : (currentAddr.city || ''),
+        district: district !== undefined ? district : (currentAddr.district || ''),
+        postalCode: postalCode !== undefined ? postalCode : (currentAddr.postalCode || '')
+    };
+
+    // 3. Timpa sepenuhnya untuk menghindari error casting Mongoose
+    provider.location.address = newAddress;
+
+    // Update Koordinat
     if (latitude !== undefined && longitude !== undefined) {
-        // Validasi angka
         const lat = parseFloat(latitude);
         const lng = parseFloat(longitude);
         
@@ -452,7 +476,7 @@ async function updateProviderProfile(req, res, next) {
         }
     }
 
-    // Update Jam Kerja (Optional)
+    // Update Jam Kerja
     if (workingHours) {
         if (workingHours.start) provider.workingHours.start = workingHours.start;
         if (workingHours.end) provider.workingHours.end = workingHours.end;
@@ -497,7 +521,7 @@ async function verifyProvider(req, res, next) {
     if (status === 'verified') {
       await User.findByIdAndUpdate(provider.userId, {
         $addToSet: { roles: 'provider' },
-        activeRole: 'provider' // [TAMBAHAN] Paksa switch role agar login berikutnya langsung masuk dashboard
+        activeRole: 'provider' 
       });
     }
 
@@ -509,8 +533,6 @@ async function verifyProvider(req, res, next) {
     next(error);
   }
 }
-
-// [DIHAPUS] Function updateSchedule sudah dihapus
 
 module.exports = {
   listProviders,
