@@ -13,7 +13,7 @@ const mongooseOptions = {
   bufferCommands: false, // Fail fast if not connected
   serverSelectionTimeoutMS: 10000, // [UPDATED] Lower timeout to fail faster (10s)
   socketTimeoutMS: 45000,
-  maxPoolSize: 10,
+  maxPoolSize: 2, // [ARCHITECTURAL FIX] Disesuaikan untuk Serverless/FaaS agar menghindari Connection Storm (turun dari 10 ke 2)
   minPoolSize: 0, // [UPDATED] Set to 0 to prevent stale connections in serverless
   maxIdleTimeMS: 10000,
   connectTimeoutMS: 10000, // [UPDATED] Lower connection timeout

@@ -12,6 +12,12 @@ async function getBookedDates(providerId) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
+  // [OPTIMIZATION FIX] Tambahkan batas atas: 6 bulan dari sekarang
+  const sixMonthsFromNow = new Date();
+  sixMonthsFromNow.setMonth(today.getMonth() + 6);
+  sixMonthsFromNow.setDate(sixMonthsFromNow.getDate() + 1); // Batas aman untuk inklusivitas hari
+  sixMonthsFromNow.setHours(0, 0, 0, 0); 
+  
   // Sesuaikan timezone dengan kebutuhan project (WIB = +07:00)
   const timezone = '+07:00';
 
@@ -19,8 +25,12 @@ async function getBookedDates(providerId) {
     {
       $match: {
         providerId: new Types.ObjectId(providerId),
-        status: { $in: ['paid', 'accepted', 'on_the_way', 'working'] },
-        scheduledAt: { $gte: today }
+        // [ROBUSTNESS] Tambahkan 'waiting_approval' agar hari itu terhitung 'booked'
+        status: { $in: ['paid', 'accepted', 'on_the_way', 'working', 'waiting_approval'] }, 
+        scheduledAt: { 
+          $gte: today,
+          $lte: sixMonthsFromNow // Batas atas ditambahkan
+        }
       }
     },
     {
@@ -110,16 +120,17 @@ async function listProviders(req, res, next) {
     // [OPTIMIZATION] Pre-fetch Service IDs untuk Category Filter
     // Jika ada filter kategori, cari dulu ID layanannya, lalu filter provider yang punya ID tsb.
     // Ini jauh lebih cepat daripada join tabel Service di dalam pipeline.
+    let searchServiceIds = [];
     if (category && typeof category === 'string' && category.trim() !== '') {
         const normalizedCategory = decodeURIComponent(category).trim().replace(/-/g, ' ');
         const categoryRegex = new RegExp(`^${escapeRegex(normalizedCategory)}$`, 'i');
         
         // Cari ID service yang relevan
         const matchedServices = await Service.find({ category: categoryRegex }).select('_id').lean();
-        const serviceIds = matchedServices.map(s => s._id);
+        searchServiceIds = matchedServices.map(s => s._id);
 
-        if (serviceIds.length > 0) {
-            initialMatch['services.serviceId'] = { $in: serviceIds };
+        if (searchServiceIds.length > 0) {
+            initialMatch['services.serviceId'] = { $in: searchServiceIds };
             // Filter juga agar hanya layanan aktif yang dianggap
             initialMatch['services.isActive'] = true; 
         } else {
@@ -134,8 +145,33 @@ async function listProviders(req, res, next) {
     }
 
     const pipeline = [];
+    let searchUserIds = []; // Untuk menyimpan ID User dari Pre-query Search
 
-    // 3. GEO-SPATIAL STAGE (Wajib paling atas jika dipakai)
+    // 3. OPTIMIZATION: Handle Text Search (Pre-query Inverted Index)
+    if (search && typeof search === 'string' && search.trim() !== '') {
+        const searchRegex = new RegExp(escapeRegex(search.trim()), 'i');
+
+        // [OPTIMIZATION FIX] Cek user yang cocok dengan nama DULU (Manfaatkan Index di collection Users)
+        const matchingUsers = await User.find({ fullName: { $regex: searchRegex } }).select('_id').lean();
+        searchUserIds = matchingUsers.map(u => u._id);
+
+        // Jika tidak ada hasil, buat query match yang sangat ketat agar pipeline cepat selesai.
+        if (searchUserIds.length === 0) {
+            initialMatch.$or = [
+                { 'location.address.city': { $regex: searchRegex } },
+                { 'location.address.district': { $regex: searchRegex } },
+            ];
+        } else {
+            // Gabungkan filter user ID dengan filter lokasi
+            initialMatch.$or = [
+                { userId: { $in: searchUserIds } },
+                { 'location.address.city': { $regex: searchRegex } },
+                { 'location.address.district': { $regex: searchRegex } },
+            ];
+        }
+    }
+
+    // 4. GEO-SPATIAL STAGE (Wajib paling atas jika dipakai)
     if (userCoordinates) {
       pipeline.push({
         $geoNear: {
@@ -151,7 +187,7 @@ async function listProviders(req, res, next) {
       pipeline.push({ $match: initialMatch });
     }
 
-    // 4. LOOKUPS (Join Late Strategy)
+    // 5. LOOKUPS (Join Late Strategy)
     // Join User Info
     pipeline.push({
       $lookup: {
@@ -173,14 +209,19 @@ async function listProviders(req, res, next) {
       }
     });
 
-    // 5. SEARCH FILTER (Regex Search)
-    // Search dilakukan setelah lookup karena kita butuh field nama user/nama service
+    // 6. SEARCH FILTER FINAL (Regex Search pada hasil Lookup)
+    // Hanya lakukan search pada hasil lookup jika ada kata kunci pencarian
     if (search && typeof search === 'string' && search.trim() !== '') {
       const searchRegex = new RegExp(escapeRegex(search.trim()), 'i');
+      
+      // Filter final untuk service name/category
+      // Catatan: Filtering berdasarkan 'userInfo.fullName' sudah dilakukan di tahap 3,
+      // tetapi perlu di-re-filter untuk kasus di mana serviceDetails.name cocok.
       pipeline.push({
         $match: {
           $or: [
-            { 'userInfo.fullName': { $regex: searchRegex } },
+            // Filter user yang tidak ter-cover oleh pre-query (optional, tapi aman)
+            { 'userInfo.fullName': { $regex: searchRegex } }, 
             { 'location.address.city': { $regex: searchRegex } },
             { 'location.address.district': { $regex: searchRegex } },
             { 'serviceDetails.name': { $regex: searchRegex } },
@@ -190,7 +231,7 @@ async function listProviders(req, res, next) {
       });
     }
 
-    // 6. SORTING
+    // 7. SORTING
     const sortOptions = {};
     if (sortBy === 'distance' && userCoordinates) {
         sortOptions.distance = 1;
@@ -206,7 +247,7 @@ async function listProviders(req, res, next) {
     }
     pipeline.push({ $sort: sortOptions });
 
-    // 7. PAGINATION & PROJECTION
+    // 8. PAGINATION & PROJECTION
     const skip = (parseInt(page) - 1) * parseInt(limit);
     pipeline.push({ $skip: skip });
     pipeline.push({ $limit: parseInt(limit) });

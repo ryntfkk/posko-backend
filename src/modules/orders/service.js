@@ -231,32 +231,173 @@ class OrderService {
     const { roles = [], userId } = user || {};
     const { view } = query;
 
-    let filter = { userId };
+    let match = { userId: new mongoose.Types.ObjectId(userId) };
 
     if (view === 'provider' && roles.includes('provider')) {
+      // Find provider ID first, this is necessary.
       const provider = await Provider.findOne({ userId }).lean();
       if (provider) {
-        filter = { providerId: provider._id };
+        match = { providerId: new mongoose.Types.ObjectId(provider._id) };
       } else {
         return [];
       }
     }
 
     if (roles.includes('admin') && !view) {
-      filter = {};
+      match = {};
     }
 
-    return await Order.find(filter)
-      .populate('items.serviceId', 'name category iconUrl')
-      .populate('userId', 'fullName phoneNumber')
-      .populate('voucherId', 'code discountType discountValue')
-      .populate({
-        path: 'providerId',
-        select: 'userId rating',
-        populate: { path: 'userId', select: 'fullName profilePictureUrl' }
-      })
-      .sort({ createdAt: -1 })
-      .lean();
+    const pipeline = [
+      { $match: match },
+      // Lookup for Customer Info
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'userId',
+          foreignField: '_id',
+          as: 'customerInfo',
+        },
+      },
+      { $unwind: { path: '$customerInfo', preserveNullAndEmptyArrays: true } },
+
+      // Lookup for Voucher Info
+      {
+        $lookup: {
+          from: 'vouchers',
+          localField: 'voucherId',
+          foreignField: '_id',
+          as: 'voucherInfo',
+        },
+      },
+      { $unwind: { path: '$voucherInfo', preserveNullAndEmptyArrays: true } },
+      
+      // Lookup for Provider Info
+      {
+        $lookup: {
+          from: 'providers',
+          localField: 'providerId',
+          foreignField: '_id',
+          as: 'providerDoc',
+        },
+      },
+      { $unwind: { path: '$providerDoc', preserveNullAndEmptyArrays: true } },
+
+      // Nested Lookup for Provider User Info
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'providerDoc.userId',
+          foreignField: '_id',
+          as: 'providerUserInfo',
+        },
+      },
+      { $unwind: { path: '$providerUserInfo', preserveNullAndEmptyArrays: true } },
+      
+      // Lookup for Service Details (nested inside items array)
+      {
+        $lookup: {
+          from: 'services',
+          localField: 'items.serviceId',
+          foreignField: '_id',
+          as: 'serviceDetails',
+        },
+      },
+
+      // Reconstruct the `items` array with populated service data
+      {
+        $addFields: {
+          items: {
+            $map: {
+              input: '$items',
+              as: 'item',
+              in: {
+                $mergeObjects: [
+                  '$$item',
+                  {
+                    serviceId: {
+                      $arrayElemAt: [
+                        {
+                          $filter: {
+                            input: '$serviceDetails',
+                            as: 'service',
+                            cond: { $eq: ['$$service._id', '$$item.serviceId'] },
+                          },
+                        },
+                        0,
+                      ],
+                    },
+                  },
+                ]
+              }
+            }
+          }
+        }
+      },
+      
+      // Project the final structure (mimicking original populate structure)
+      {
+        $project: {
+          // Fields from Order
+          _id: 1,
+          orderNumber: 1,
+          totalAmount: 1,
+          status: 1,
+          createdAt: 1,
+          scheduledAt: 1,
+          orderType: 1,
+          adminFee: 1,
+          discountAmount: 1,
+          completionEvidence: 1,
+          additionalFees: 1,
+          // Items
+          items: {
+            $map: {
+              input: '$items',
+              as: 'item',
+              in: {
+                serviceId: {
+                  _id: '$$item.serviceId._id',
+                  name: '$$item.serviceId.name',
+                  category: '$$item.serviceId.category',
+                  iconUrl: '$$item.serviceId.iconUrl',
+                },
+                name: '$$item.name',
+                price: '$$item.price',
+                quantity: '$$item.quantity',
+                note: '$$item.note',
+              }
+            }
+          },
+          // User (Customer) Info
+          userId: {
+            _id: '$customerInfo._id',
+            fullName: '$customerInfo.fullName',
+            phoneNumber: '$customerInfo.phoneNumber',
+          },
+          // Voucher Info
+          voucherId: {
+            _id: '$voucherInfo._id',
+            code: '$voucherInfo.code',
+            discountType: '$voucherInfo.discountType',
+            discountValue: '$voucherInfo.discountValue',
+          },
+          // Provider Info
+          providerId: {
+            _id: '$providerDoc._id',
+            rating: '$providerDoc.rating',
+            userId: {
+              _id: '$providerUserInfo._id',
+              fullName: '$providerUserInfo.fullName',
+              profilePictureUrl: '$providerUserInfo.profilePictureUrl',
+            },
+          }
+        }
+      },
+      { $sort: { createdAt: -1 } }
+    ];
+
+    // Gunakan allowDiskUse: true untuk aggregation yang sangat besar, tapi biarkan false dulu
+    return await Order.aggregate(pipeline);
   }
 
   async createOrder(user, body) {
@@ -319,6 +460,9 @@ class OrderService {
         if (!serviceDoc) throw new Error(`Service ID ${item.serviceId} tidak ditemukan.`);
 
         const quantity = parseInt(item.quantity) || 1;
+        // [LOGICAL ROBUSTNESS FIX] Validasi Quantity
+        if (quantity <= 0) throw new Error(`Quantity untuk layanan ${serviceDoc.name} harus positif.`);
+        
         let realPrice;
 
         if (orderType === 'direct' && providerData) {
@@ -459,7 +603,8 @@ class OrderService {
         await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { orderId: order._id }, { session });
       }
 
-      // [FIX] Commit transaction SEBELUM logic socket/broadcast
+      // [ARCHITECTURAL ROBUSTNESS] Commit transaction SEBELUM side effect (socket/broadcast)
+      // Pastikan data order tersimpan ke DB sebelum mengirim notifikasi.
       await session.commitTransaction();
       
       createdOrder = order;
@@ -474,7 +619,8 @@ class OrderService {
       session.endSession();
     }
 
-    // --- SOCKET & BROADCAST Logic (Di luar Transaction) ---
+    // --- SOCKET & BROADCAST Logic (DECOUPLED Side Effect - Di luar Transaction) ---
+    // [ARCHITECTURAL FLAWS] Logic notifikasi harusnya di NotificationService, bukan OrderService.
     // Error di sini tidak akan membatalkan order yang sudah tersimpan
     try {
       const io = getIO();
@@ -492,7 +638,7 @@ class OrderService {
         await this.broadcastBasicOrderToNearbyProviders(createdOrder);
       }
     } catch (broadcastError) {
-      console.error('[ORDER POST-PROCESS ERROR] Notification failed:', broadcastError);
+      console.error('[ORDER POST-PROCESS ERROR] Notification failed, consider using FCM/Email fallback:', broadcastError);
       // Jangan throw error ke controller agar response tetap 201 Created
     }
 
