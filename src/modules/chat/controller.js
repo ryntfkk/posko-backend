@@ -1,6 +1,7 @@
 // src/modules/chat/controller.js
 const Chat = require('./model');
-const User = require('../../models/User'); // Pastikan path sesuai
+const User = require('../../models/User');
+const Provider = require('../providers/model');
 
 // List semua room chat milik user
 async function listRooms(req, res, next) {
@@ -8,11 +9,16 @@ async function listRooms(req, res, next) {
     const userId = req.user.userId;
     
     // Cari chat di mana user menjadi salah satu participant
+    // Populate info lawan bicara untuk ditampilkan di list
     const rooms = await Chat.find({ participants: userId })
-      .populate('participants', 'fullName profilePictureUrl activeRole') // Ambil info lawan bicara
-      .sort({ updatedAt: -1 }); // Urutkan dari yang terbaru
+      .populate('participants', 'fullName profilePictureUrl activeRole') 
+      .sort({ updatedAt: -1 }); // Urutkan dari pesan terbaru
 
-    res.json({ messageKey: 'chat.list', message: 'List chat berhasil', data: rooms });
+    res.json({ 
+      messageKey: 'chat.list', 
+      message: 'List chat berhasil', 
+      data: rooms 
+    });
   } catch (error) {
     next(error);
   }
@@ -24,34 +30,67 @@ async function createRoom(req, res, next) {
     const userId = req.user.userId;
     const { targetUserId } = req.body; // ID Lawan Bicara
 
-    if (!targetUserId) return res.status(400).json({ message: 'Target User ID required' });
+    if (!targetUserId) {
+      return res.status(400).json({ message: 'Target User ID wajib diisi.' });
+    }
+
+    if (userId === targetUserId) {
+        return res.status(400).json({ message: 'Tidak dapat memulai chat dengan diri sendiri.' });
+    }
+
+    // [SECURITY] Cek Validitas Target User
+    const targetUser = await User.findById(targetUserId);
+    if (!targetUser) {
+        return res.status(404).json({ message: 'User tujuan tidak ditemukan.' });
+    }
+
+    // [RULE] Jika Target adalah Mitra, pastikan dia SUDAH TERVERIFIKASI
+    // Ini mencegah customer menghubungi mitra yang pending/rejected/suspended
+    const targetProvider = await Provider.findOne({ userId: targetUserId });
+    if (targetProvider) {
+        if (targetProvider.verificationStatus !== 'verified') {
+            return res.status(403).json({ 
+                message: 'Mitra ini belum terverifikasi atau sedang ditangguhkan. Tidak dapat memulai percakapan.' 
+            });
+        }
+    }
 
     // Cek apakah sudah ada chat room antara dua orang ini
     let chat = await Chat.findOne({
       participants: { $all: [userId, targetUserId] }
     }).populate('participants', 'fullName profilePictureUrl');
 
+    // Jika belum ada, buat baru
     if (!chat) {
       chat = new Chat({ participants: [userId, targetUserId], messages: [] });
       await chat.save();
       await chat.populate('participants', 'fullName profilePictureUrl');
     }
 
-    res.status(201).json({ messageKey: 'chat.created', message: 'Room siap', data: chat });
+    res.status(201).json({ 
+      messageKey: 'chat.created', 
+      message: 'Room chat siap digunakan', 
+      data: chat 
+    });
   } catch (error) {
     next(error);
   }
 }
 
-// [TAMBAHAN] Ambil detail pesan dalam satu room
+// Ambil detail pesan dalam satu room
 async function getChatDetail(req, res, next) {
   try {
     const { roomId } = req.params;
-    const chat = await Chat.findById(roomId)
-        .populate('participants', 'fullName profilePictureUrl')
-        .populate('messages.sender', 'fullName'); // Populate pengirim pesan
+    const userId = req.user.userId;
+
+    // [SECURITY] Pastikan yang request adalah anggota room tersebut
+    const chat = await Chat.findOne({ _id: roomId, participants: userId })
+        .populate('participants', 'fullName profilePictureUrl activeRole')
+        .populate('messages.sender', 'fullName profilePictureUrl'); // Populate pengirim pesan
     
-    if (!chat) return res.status(404).json({ message: 'Chat not found' });
+    if (!chat) {
+      return res.status(404).json({ message: 'Chat tidak ditemukan atau Anda tidak memiliki akses.' });
+    }
 
     res.json({ message: 'Detail chat', data: chat });
   } catch (error) {

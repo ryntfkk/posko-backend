@@ -1,12 +1,30 @@
+// src/modules/earnings/controller.js
 const Earnings = require('./model');
+const Provider = require('../providers/model'); // [BARU] Import Provider untuk validasi bank
 const mongoose = require('mongoose');
 
 // 1. LIST EARNINGS HISTORY (Provider)
 async function listEarnings(req, res, next) {
   try {
     const userId = req.user.userId;
+    const { startDate, endDate, status } = req.query;
 
-    const earnings = await Earnings.find({ userId })
+    const filter = { userId };
+    
+    // Filter by Status
+    if (status) {
+        filter.status = status;
+    }
+
+    // Filter by Date Range
+    if (startDate && endDate) {
+        filter.completedAt = {
+            $gte: new Date(startDate),
+            $lte: new Date(endDate)
+        };
+    }
+
+    const earnings = await Earnings.find(filter)
       .sort({ completedAt: -1 })
       .lean();
 
@@ -19,7 +37,7 @@ async function listEarnings(req, res, next) {
   }
 }
 
-// 2. GET EARNINGS SUMMARY (Provider)
+// 2. GET EARNINGS SUMMARY (Provider - FIXED LOGIC)
 async function getEarningsSummary(req, res, next) {
   try {
     const userId = req.user.userId;
@@ -28,34 +46,52 @@ async function getEarningsSummary(req, res, next) {
       { 
         $match: { 
           userId: new mongoose.Types.ObjectId(userId),
-          status: 'completed' 
+          status: { $in: ['completed', 'paid_out'] } // [FIX] Ambil yang sudah cair juga
         } 
       },
       {
         $group: {
           _id: null,
-          totalEarnings: { $sum: '$earningsAmount' },
-          platformCommission: { $sum: '$platformCommissionAmount' },
+          // Total Seumur Hidup (Completed + Paid Out)
+          lifetimeEarnings: { $sum: '$earningsAmount' },
+          
+          // Saldo Aktif (Hanya Completed / Belum Cair)
+          currentBalance: {
+            $sum: {
+              $cond: [{ $eq: ['$status', 'completed'] }, '$earningsAmount', 0]
+            }
+          },
+
+          // Sudah Dicairkan (Paid Out)
+          totalWithdrawn: {
+            $sum: {
+              $cond: [{ $eq: ['$status', 'paid_out'] }, '$earningsAmount', 0]
+            }
+          },
+
+          totalPlatformCommission: { $sum: '$platformCommissionAmount' },
           completedOrders: { $sum: 1 }
         }
       }
     ]);
 
     const result = stats[0] || {
-      totalEarnings: 0,
-      platformCommission: 0,
+      lifetimeEarnings: 0,
+      currentBalance: 0,
+      totalWithdrawn: 0,
+      totalPlatformCommission: 0,
       completedOrders: 0
     };
 
     const averageEarningsPerOrder = result.completedOrders > 0 
-      ? result.totalEarnings / result.completedOrders 
+      ? result.lifetimeEarnings / result.completedOrders 
       : 0;
 
     res.json({
       message: 'Ringkasan penghasilan berhasil diambil',
       data: {
         ...result,
-        averageEarningsPerOrder
+        averageEarningsPerOrder: Math.round(averageEarningsPerOrder)
       }
     });
 
@@ -71,14 +107,20 @@ async function getPlatformStats(req, res, next) {
     if (!roles.includes('admin')) return res.status(403).json({ message: 'Forbidden' });
 
     const stats = await Earnings.aggregate([
-      { $match: { status: 'completed' } },
+      { $match: { status: { $in: ['completed', 'paid_out'] } } },
       {
         $group: {
           _id: null,
-          totalTransactionValue: { $sum: '$totalAmount' },
+          totalTransactionValue: { $sum: '$totalAmount' }, // GMV
           totalPlatformRevenue: { $sum: '$platformCommissionAmount' },
           totalAdminFees: { $sum: '$adminFee' },
-          totalOrders: { $sum: 1 }
+          totalOrders: { $sum: 1 },
+          // Tambahan: Berapa yang belum dibayarkan ke mitra
+          pendingPayouts: {
+             $sum: {
+               $cond: [{ $eq: ['$status', 'completed'] }, '$earningsAmount', 0]
+             }
+          }
         }
       }
     ]);
@@ -87,7 +129,8 @@ async function getPlatformStats(req, res, next) {
       totalTransactionValue: 0,
       totalPlatformRevenue: 0,
       totalAdminFees: 0,
-      totalOrders: 0
+      totalOrders: 0,
+      pendingPayouts: 0
     };
 
     data.netRevenue = data.totalPlatformRevenue + data.totalAdminFees;
@@ -98,7 +141,7 @@ async function getPlatformStats(req, res, next) {
   }
 }
 
-// [BARU] ADMIN: List All Earnings (Untuk Pencairan)
+// 4. ADMIN: List All Earnings (Untuk Pencairan)
 async function listAllEarnings(req, res, next) {
   try {
     const { roles = [] } = req.user || {};
@@ -110,13 +153,15 @@ async function listAllEarnings(req, res, next) {
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
+    // Populate data Provider & Bank Account
     const earnings = await Earnings.find(filter)
       .populate({
         path: 'providerId',
-        select: 'bankAccount userId',
-        populate: { path: 'userId', select: 'fullName email' }
+        select: 'bankAccount userId', // Ambil info bank
+        populate: { path: 'userId', select: 'fullName email phoneNumber' }
       })
-      .sort({ completedAt: -1 })
+      .populate('orderId', 'orderNumber') // Tampilkan nomor order
+      .sort({ completedAt: 1 }) // Urutkan yang lama dulu (FIFO payout)
       .skip(skip)
       .limit(parseInt(limit));
 
@@ -136,7 +181,7 @@ async function listAllEarnings(req, res, next) {
   }
 }
 
-// [BARU] ADMIN: Process Payout (Tandai Sudah Transfer)
+// 5. ADMIN: Process Payout (Tandai Sudah Transfer)
 async function processPayout(req, res, next) {
   try {
     const { roles = [] } = req.user || {};
@@ -144,19 +189,28 @@ async function processPayout(req, res, next) {
 
     const { id } = req.params; // ID Earnings
 
-    const earning = await Earnings.findById(id);
-    if (!earning) return res.status(404).json({ message: 'Data tidak ditemukan' });
+    const earning = await Earnings.findById(id).populate('providerId');
+    if (!earning) return res.status(404).json({ message: 'Data pendapatan tidak ditemukan' });
 
     if (earning.status !== 'completed') {
       return res.status(400).json({ message: 'Hanya status "completed" yang bisa dicairkan.' });
     }
 
+    // [VALIDASI] Cek apakah Mitra punya rekening bank
+    const provider = earning.providerId;
+    if (!provider || !provider.bankAccount || !provider.bankAccount.accountNumber) {
+        return res.status(400).json({ 
+            message: 'Gagal mencairkan. Mitra belum mengatur Rekening Bank.' 
+        });
+    }
+
+    // Update Status
     earning.status = 'paid_out';
     earning.paidOutAt = new Date();
     await earning.save();
 
     res.json({
-      message: 'Status berhasil diubah menjadi Paid Out',
+      message: 'Status berhasil diubah menjadi Paid Out (Sudah Ditransfer)',
       data: earning
     });
   } catch (error) {

@@ -1,3 +1,4 @@
+// src/modules/auth/controller.js
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const env = require('../../config/env');
@@ -69,7 +70,7 @@ function isDuplicateKeyError(error) {
 }
 
 // ===================
-// REGISTER
+// REGISTER CUSTOMER
 // ===================
 async function register(req, res, next) {
   try {
@@ -194,13 +195,15 @@ async function login(req, res, next) {
     if (provider) {
       providerStatus = provider.verificationStatus;
       
-      // OPTIONAL: Auto-switch ke provider jika sudah verified tapi masih customer
+      // [AUTO SWITCH] Auto-switch ke provider jika sudah verified tapi masih customer
       // Ini menyelesaikan masalah redirect loop di frontend
       if (providerStatus === 'verified' && user.activeRole === 'customer') {
-         user.activeRole = 'provider';
+         // Pastikan role provider ada di array roles
          if (!user.roles.includes('provider')) {
             user.roles.push('provider');
          }
+         // Set active role
+         user.activeRole = 'provider';
          await user.save();
       }
     }
@@ -275,7 +278,6 @@ async function refreshToken(req, res, next) {
     }
 
     // [FIX] Fetch ulang status provider saat refresh token
-    // Gunakan logika yang sama: Cek provider existence, bukan cuma activeRole
     let providerStatus = null;
     const provider = await Provider.findOne({ userId: user._id });
     if (provider) {
@@ -287,13 +289,17 @@ async function refreshToken(req, res, next) {
 
     const tokenIndex = user.refreshTokens.indexOf(refreshToken);
     if (tokenIndex !== -1) {
-      user.refreshTokens.push(newTokens.refreshToken);
-      // Hapus token lama setelah rotasi
-      user.refreshTokens.splice(tokenIndex, 1);
+      // Hapus token lama dan ganti dengan yang baru
+      user.refreshTokens[tokenIndex] = newTokens.refreshToken;
     } else {
       user.refreshTokens.push(newTokens.refreshToken);
     }
     
+    // Bersihkan token yang sudah sangat tua jika array terlalu besar (opsional safety)
+    if (user.refreshTokens.length > 10) {
+        user.refreshTokens = user.refreshTokens.slice(-5);
+    }
+
     await user.save();
 
     setAuthCookies(res, newTokens.accessToken, newTokens.refreshToken);
@@ -473,7 +479,7 @@ async function switchRole(req, res, next) {
 }
 
 // ===================
-// REGISTER PARTNER (FIXED LOCATION SYNC)
+// REGISTER PARTNER (FIXED LOCATION STRUCTURE)
 // ===================
 async function registerPartner(req, res, next) {
   try {
@@ -521,21 +527,34 @@ async function registerPartner(req, res, next) {
         certificateUrl: files['certificate'] ? `/uploads/${files['certificate'][0].filename}` : ''
     };
 
-    // [FIX] Validasi Lokasi User sebelum membuat Provider
-    // Salin koordinat dari User. Jika User [0,0], tetap gunakan itu, 
-    // tapi idealnya User sudah punya lokasi dari registrasi awal.
+    // [FIX] Validasi Struktur Lokasi sesuai Schema Provider
+    // Provider Schema mengharapkan address sebagai Object { fullAddress, district, ... }
+    // Bukan string biasa.
+    
     let providerLocation = {
         type: 'Point',
-        coordinates: [0, 0],
-        address: domicileAddress || '' 
+        coordinates: [0, 0], // Default di laut
+        address: {
+            fullAddress: domicileAddress || '', // Simpan alamat teks di sini
+            district: '',
+            city: '',
+            province: '',
+            postalCode: ''
+        }
     };
 
     if (user.location && user.location.coordinates && Array.isArray(user.location.coordinates)) {
-        // Salin koordinat user
-        providerLocation.coordinates = user.location.coordinates;
-        // Salin detail alamat user jika provider tidak mengisi detail spesifik (optional logic)
-        // Di sini kita gunakan domicileAddress yang diinput di form partner sebagai 'address' text di provider
-        providerLocation.address = domicileAddress || (user.address ? user.address.detail : '');
+        // Salin koordinat user jika ada
+        const [lng, lat] = user.location.coordinates;
+        if (lng !== 0 || lat !== 0) {
+            providerLocation.coordinates = [lng, lat];
+        }
+        
+        // Opsional: Jika user punya detail alamat yang lebih lengkap, bisa dicopy
+        // Tapi prioritas adalah input 'domicileAddress' dari form registrasi mitra
+        if (!domicileAddress && user.address && user.address.detail) {
+             providerLocation.address.fullAddress = user.address.detail;
+        }
     }
 
     const providerData = {
@@ -543,7 +562,7 @@ async function registerPartner(req, res, next) {
         verificationStatus: 'pending',
         documents: docPaths,
         
-        // [BARU] Inisialisasi Lokasi Provider dari Data User
+        // Gunakan struktur lokasi yang sudah diperbaiki
         location: providerLocation,
 
         personalInfo: {
@@ -551,7 +570,7 @@ async function registerPartner(req, res, next) {
             dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
             gender: gender || 'Laki-laki'
         },
-        domicileAddress: domicileAddress || '',
+        domicileAddress: domicileAddress || '', // Field legacy (opsional disimpan juga)
         
         bankAccount: {
             bankName: bankName || '',

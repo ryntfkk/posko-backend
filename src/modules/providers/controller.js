@@ -34,70 +34,95 @@ async function getCompletedOrdersCount(providerId) {
 async function listProviders(req, res, next) {
   try {
     const {
-      lat,
-      lng,
       category,
       search,
       sortBy = 'distance',
       limit = 10,
-      page = 1
+      page = 1,
+      // Parameter GPS opsional (untuk Guest)
+      lat, 
+      lng
     } = req.query;
+
+    let userCoordinates = null;
+    let locationSource = 'none'; // 'db', 'gps', 'none'
+
+    // 1. CEK KOORDINAT USER (PRIORITAS: DATABASE)
+    if (req.user && req.user.userId) {
+        const customer = await User.findById(req.user.userId).select('location');
+        if (customer && customer.location && customer.location.coordinates && customer.location.coordinates.length === 2) {
+            const [cLng, cLat] = customer.location.coordinates;
+            // Validasi bukan [0,0] default
+            if (cLng !== 0 || cLat !== 0) {
+                userCoordinates = [cLng, cLat];
+                locationSource = 'db';
+            }
+        }
+    }
+
+    // 2. CEK KOORDINAT GPS (FALLBACK: GUEST)
+    // Jika tidak dapat dari DB (Guest atau User belum set alamat), coba pakai query params
+    if (!userCoordinates && lat && lng) {
+        const pLat = parseFloat(lat);
+        const pLng = parseFloat(lng);
+        if (!isNaN(pLat) && !isNaN(pLng)) {
+            userCoordinates = [pLng, pLat];
+            locationSource = 'gps';
+        }
+    }
 
     const pipeline = [];
 
-    // 1.GEO-SPATIAL FILTER
-    if (lat && lng) {
+    // 3. GEO-SPATIAL FILTER (Jika ada koordinat)
+    if (userCoordinates) {
       pipeline.push({
         $geoNear: {
           near: {
             type: "Point",
-            coordinates: [parseFloat(lng), parseFloat(lat)]
+            coordinates: userCoordinates
           },
-          distanceField: "distance",
-          maxDistance: 20000,
+          distanceField: "distance", // Output jarak dalam meter
+          maxDistance: 20000, // 20 KM
           spherical: true,
           query: {
-            roles: { $in: ['provider'] }
+            verificationStatus: 'verified', // [FIX] Hanya Mitra Terverifikasi
+            isOnline: true // [FIX] Hanya Mitra Online
           }
         }
       });
     } else {
+      // 3.B. FILTER STANDAR (Jika tidak ada koordinat)
       pipeline.push({
         $match: {
-          roles: { $in: ['provider'] }
+            verificationStatus: 'verified',
+            isOnline: true
         }
       });
     }
 
-    // 2. RELASI KE DATA PROVIDER
+    // 4. RELASI KE DATA USER (Untuk ambil Nama, Foto, Bio personal mitra)
     pipeline.push({
       $lookup: {
-        from: 'providers',
-        localField: '_id',
-        foreignField: 'userId',
-        as: 'providerInfo'
+        from: 'users',
+        localField: 'userId',
+        foreignField: '_id',
+        as: 'userInfo'
       }
     });
 
-    pipeline.push({
-      $match: {
-        'providerInfo': { $ne: [] }
-      }
-    });
+    pipeline.push({ $unwind: '$userInfo' });
 
-    pipeline.push({ $unwind: '$providerInfo' });
-
-    // 3.RELASI KE LAYANAN
+    // 5. RELASI KE LAYANAN
     pipeline.push({
       $lookup: {
         from: 'services',
-        localField: 'providerInfo.services.serviceId',
+        localField: 'services.serviceId',
         foreignField: '_id',
         as: 'serviceDetails'
       }
     });
 
-    // 4.LOGIKA FILTER
+    // 6. LOGIKA FILTER (Category & Search)
     const matchConditions = [];
 
     const isValidCategory = category &&
@@ -112,31 +137,11 @@ async function listProviders(req, res, next) {
         .trim()
         .replace(/-/g, ' ');
 
-      pipeline.push({
-        $addFields: {
-          hasMatchingService: {
-            $gt: [
-              {
-                $size: {
-                  $filter: {
-                    input: '$serviceDetails',
-                    as: 'svc',
-                    cond: {
-                      $eq: [
-                        { $toLower: { $trim: { input: '$$svc.category' } } },
-                        normalizedCategory
-                      ]
-                    }
-                  }
-                }
-              },
-              0
-            ]
-          }
+      matchConditions.push({
+        'serviceDetails.category': { 
+            $regex: new RegExp(`^${normalizedCategory}$`, 'i') 
         }
       });
-
-      matchConditions.push({ hasMatchingService: true });
     }
 
     const isValidSearch = search &&
@@ -147,9 +152,9 @@ async function listProviders(req, res, next) {
       const searchRegex = new RegExp(search.trim(), 'i');
       matchConditions.push({
         $or: [
-          { fullName: { $regex: searchRegex } },
-          { 'address.city': { $regex: searchRegex } },
-          { 'address.district': { $regex: searchRegex } },
+          { 'userInfo.fullName': { $regex: searchRegex } },
+          { 'location.address.city': { $regex: searchRegex } },
+          { 'location.address.district': { $regex: searchRegex } },
           { 'serviceDetails.name': { $regex: searchRegex } },
           { 'serviceDetails.category': { $regex: searchRegex } }
         ]
@@ -160,46 +165,63 @@ async function listProviders(req, res, next) {
       pipeline.push({ $match: { $and: matchConditions } });
     }
 
-    // 5.SORTING
-    const sortOptions = {
-      distance: { distance: 1 },
-      price_asc: { 'providerInfo.services.price': 1 },
-      price_desc: { 'providerInfo.services.price': -1 },
-      rating: { 'providerInfo.rating': -1 }
-    };
-    pipeline.push({ $sort: sortOptions[sortBy] || { distance: 1 } });
+    // 7. SORTING
+    // Jika ada koordinat, default sort by distance. Jika tidak, sort by rating/terbaru
+    const sortOptions = {};
+    
+    if (sortBy === 'distance') {
+        if (userCoordinates) {
+            sortOptions.distance = 1;
+        } else {
+            // Fallback jika user minta sort distance tapi tidak ada lokasi -> Sort by Rating
+            sortOptions.rating = -1;
+        }
+    } else if (sortBy === 'price_asc') {
+        sortOptions['services.price'] = 1;
+    } else if (sortBy === 'price_desc') {
+        sortOptions['services.price'] = -1;
+    } else if (sortBy === 'rating') {
+        sortOptions.rating = -1;
+    } else {
+        // Default sort
+        sortOptions[userCoordinates ? 'distance' : 'rating'] = userCoordinates ? 1 : -1;
+    }
 
-    // 6.PAGINATION
+    pipeline.push({ $sort: sortOptions });
+
+    // 8. PAGINATION
     const skip = (parseInt(page) - 1) * parseInt(limit);
     pipeline.push({ $skip: skip });
     pipeline.push({ $limit: parseInt(limit) });
 
-    // 7.PROJECT (Format Output)
+    // 9. PROJECTION
     pipeline.push({
       $project: {
-        _id: '$providerInfo._id',
-        userId: {
-          _id: '$_id',
-          fullName: '$fullName',
-          email: '$email',
-          profilePictureUrl: '$profilePictureUrl',
-          address: '$address',
-          location: '$location',
-          bio: '$bio',
-          phoneNumber: '$phoneNumber'
+        _id: 1, 
+        userId: { 
+          _id: '$userInfo._id',
+          fullName: '$userInfo.fullName',
+          email: '$userInfo.email',
+          profilePictureUrl: '$userInfo.profilePictureUrl',
+          address: '$userInfo.address', 
+          location: '$userInfo.location',
+          bio: '$userInfo.bio',
+          phoneNumber: '$userInfo.phoneNumber'
         },
-        services: '$providerInfo.services',
-        rating: '$providerInfo.rating',
-        isOnline: '$providerInfo.isOnline',
-        blockedDates: '$providerInfo.blockedDates',
-        portfolioImages: '$providerInfo.portfolioImages',
-        totalCompletedOrders: '$providerInfo.totalCompletedOrders',
-        createdAt: '$providerInfo.createdAt',
-        distance: '$distance'
+        services: 1, 
+        rating: 1,
+        isOnline: 1,
+        blockedDates: 1,
+        portfolioImages: 1,
+        totalCompletedOrders: 1,
+        createdAt: 1,
+        // Distance hanya ada jika $geoNear dieksekusi
+        distance: userCoordinates ? '$distance' : { $literal: null },
+        operationalLocation: '$location' 
       }
     });
 
-    const providers = await User.aggregate(pipeline);
+    const providers = await Provider.aggregate(pipeline);
 
     await Provider.populate(providers, {
       path: 'services.serviceId',
@@ -210,6 +232,10 @@ async function listProviders(req, res, next) {
     res.json({
       messageKey: 'providers.list',
       message: 'Berhasil memuat data mitra',
+      meta: {
+          locationSource: locationSource, // Info untuk frontend: 'db', 'gps', atau 'none'
+          count: providers.length
+      },
       data: providers
     });
 

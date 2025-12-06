@@ -77,7 +77,8 @@ async function broadcastBasicOrderToNearbyProviders(order) {
     // 1. Lokasinya dalam radius X km
     // 2. Memiliki salah satu layanan yang diminta (dan aktif)
     // 3. Status provider 'isAvailable' (Online)
-    // 4. Akun User-nya aktif
+    // 4. [FIX] Status verifikasi 'verified' (Wajib)
+    // 5. Akun User-nya aktif
     const nearbyProviders = await Provider.find({
       location: {
         $near: {
@@ -89,6 +90,7 @@ async function broadcastBasicOrderToNearbyProviders(order) {
         }
       },
       isAvailable: true, // Provider sedang "Online" switch-nya
+      verificationStatus: 'verified', // [FIX] Hanya Mitra Terverifikasi
       'services': {
         $elemMatch: {
           serviceId: { $in: requiredServiceIds },
@@ -97,7 +99,7 @@ async function broadcastBasicOrderToNearbyProviders(order) {
       }
     }).populate('userId', 'fullName fcmToken'); // Populate userId untuk dapatkan socket room ID / FCM Token
 
-    console.log(`[BROADCAST] Found ${nearbyProviders.length} providers near order ${order._id}`);
+    console.log(`[BROADCAST] Found ${nearbyProviders.length} verified providers near order ${order._id}`);
 
     // Emit ke setiap provider yang memenuhi syarat
     // Asumsi: Room socket provider menggunakan User ID mereka
@@ -317,6 +319,12 @@ async function createOrder(req, res, next) {
       if (!providerData) {
         await session.abortTransaction();
         return res.status(404).json({ message: 'Mitra tidak ditemukan atau tidak aktif.' });
+      }
+
+      // [FIX] Validasi Verifikasi Mitra untuk Order Langsung
+      if (providerData.verificationStatus !== 'verified') {
+        await session.abortTransaction();
+        return res.status(400).json({ message: 'Mitra ini belum terverifikasi dan belum dapat menerima pesanan.' });
       }
 
       if (providerData.userId) {
@@ -635,6 +643,18 @@ async function listIncomingOrders(req, res, next) {
       return res.status(403).json({ message: 'Anda belum terdaftar sebagai Mitra.' });
     }
 
+    // [FIX] Cek Status Verifikasi Mitra
+    if (provider.verificationStatus !== 'verified') {
+        return res.json({ 
+            message: 'Akun Anda belum terverifikasi. Mohon tunggu verifikasi admin untuk menerima pesanan.',
+            providerStatus: {
+                verificationStatus: provider.verificationStatus,
+                isBusy: false
+            },
+            data: [] // Return array kosong, jangan error
+        });
+    }
+
     const myServiceIds = provider.services
       .filter(s => s.isActive)
       .map(s => s.serviceId.toString());
@@ -694,7 +714,8 @@ async function listIncomingOrders(req, res, next) {
       message: 'Daftar order masuk berhasil diambil',
       providerStatus: {
         activeOrderCount: activeOrderCount,
-        isBusy: activeOrderCount > 0
+        isBusy: activeOrderCount > 0,
+        verificationStatus: provider.verificationStatus
       },
       data: combinedOrders 
     });
@@ -713,6 +734,11 @@ async function acceptOrder(req, res, next) {
     const provider = await Provider.findOne({ userId }).lean();
     if (!provider) {
       return res.status(403).json({ message: 'Akses ditolak.' });
+    }
+
+    // [FIX] Validasi Verifikasi saat menerima order
+    if (provider.verificationStatus !== 'verified') {
+        return res.status(403).json({ message: 'Akun Anda belum terverifikasi.' });
     }
 
     const orderCheck = await Order.findById(orderId).lean();
