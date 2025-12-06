@@ -1,4 +1,3 @@
-// src/modules/auth/controller.js
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const env = require('../../config/env');
@@ -288,7 +287,9 @@ async function refreshToken(req, res, next) {
 
     const tokenIndex = user.refreshTokens.indexOf(refreshToken);
     if (tokenIndex !== -1) {
-      user.refreshTokens[tokenIndex] = newTokens.refreshToken;
+      user.refreshTokens.push(newTokens.refreshToken);
+      // Hapus token lama setelah rotasi
+      user.refreshTokens.splice(tokenIndex, 1);
     } else {
       user.refreshTokens.push(newTokens.refreshToken);
     }
@@ -472,7 +473,7 @@ async function switchRole(req, res, next) {
 }
 
 // ===================
-// REGISTER PARTNER
+// REGISTER PARTNER (FIXED LOCATION SYNC)
 // ===================
 async function registerPartner(req, res, next) {
   try {
@@ -520,11 +521,31 @@ async function registerPartner(req, res, next) {
         certificateUrl: files['certificate'] ? `/uploads/${files['certificate'][0].filename}` : ''
     };
 
+    // [FIX] Validasi Lokasi User sebelum membuat Provider
+    // Salin koordinat dari User. Jika User [0,0], tetap gunakan itu, 
+    // tapi idealnya User sudah punya lokasi dari registrasi awal.
+    let providerLocation = {
+        type: 'Point',
+        coordinates: [0, 0],
+        address: domicileAddress || '' 
+    };
+
+    if (user.location && user.location.coordinates && Array.isArray(user.location.coordinates)) {
+        // Salin koordinat user
+        providerLocation.coordinates = user.location.coordinates;
+        // Salin detail alamat user jika provider tidak mengisi detail spesifik (optional logic)
+        // Di sini kita gunakan domicileAddress yang diinput di form partner sebagai 'address' text di provider
+        providerLocation.address = domicileAddress || (user.address ? user.address.detail : '');
+    }
+
     const providerData = {
         userId,
         verificationStatus: 'pending',
         documents: docPaths,
         
+        // [BARU] Inisialisasi Lokasi Provider dari Data User
+        location: providerLocation,
+
         personalInfo: {
             nik: nik || '',
             dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
@@ -556,15 +577,11 @@ async function registerPartner(req, res, next) {
     };
 
     if (existingProvider) {
+        // Jika provider rejected dan daftar ulang, update data yang ada
         await Provider.updateOne({ userId }, providerData);
     } else {
         await Provider.create(providerData);
     }
-
-    // Jika user belum punya role provider, jangan ditambahkan dulu sebelum verified oleh admin
-    // Namun, agar user bisa melihat status pendaftaran, kita bisa biarkan dia di role customer 
-    // atau kita arahkan dia ke halaman tunggu.
-    // Di sini kita tidak mengubah roles user menjadi provider sampai admin meng-approve.
 
     res.json({
       message: 'Pendaftaran lengkap berhasil dikirim! Admin akan memverifikasi data dan dokumen Anda segera.',

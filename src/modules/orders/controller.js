@@ -625,7 +625,7 @@ async function getOrderById(req, res, next) {
   }
 }
 
-// 4. LIST INCOMING ORDERS
+// 4. LIST INCOMING ORDERS (REVISED)
 async function listIncomingOrders(req, res, next) {
   try {
     const userId = req.user.userId;
@@ -641,49 +641,54 @@ async function listIncomingOrders(req, res, next) {
     
     const activeOrderCount = await getProviderActiveOrderCount(provider._id);
     
-    // [UPDATE] Filter Basic Orders menggunakan Geo-Spatial (Radius 15KM)
-    // Jika provider melihat list ini, kita filter agar hanya yang dekat saja yang muncul
-    
-    let geoFilter = {};
-    if (provider.location && provider.location.coordinates) {
-       geoFilter = {
-         location: {
-           $near: {
-             $geometry: {
-               type: "Point",
-               coordinates: provider.location.coordinates
-             },
-             $maxDistance: BROADCAST_RADIUS_KM * 1000 // 15 KM
-           }
-         }
-       };
-    }
-
-    const orders = await Order.find({
-      $or: [
-        { 
-          orderType: 'basic', 
-          status: 'searching',
-          providerId: null, 
-          'items.serviceId': { $in: myServiceIds },
-          ...geoFilter, // Tambahkan filter lokasi
-          $expr: { $eq: [activeOrderCount, 0] }
-        },
-        { 
-          providerId: provider._id,
-          status: 'paid'
-        }
-      ]
+    // QUERY 1: Cari Direct Order atau Order yang sudah dibayar khusus untuk Provider ini
+    const directOrdersPromise = Order.find({
+        providerId: provider._id,
+        status: 'paid'
     })
     .populate('userId', 'fullName profilePictureUrl phoneNumber')
     .populate('items.serviceId', 'name category iconUrl')
-    .sort({ scheduledAt: 1 })
     .lean();
 
-    let filteredOrders = orders;
-    if (activeOrderCount > 0) {
-      filteredOrders = orders.filter(o => o.orderType !== 'basic' || o.status === 'paid');
+    // QUERY 2: Cari Basic Order di sekitar (Marketplace)
+    // Hanya dijalankan jika provider sedang TIDAK sibuk (activeOrderCount == 0)
+    let basicOrdersPromise = Promise.resolve([]);
+    
+    if (activeOrderCount === 0) {
+        let basicQuery = {
+            orderType: 'basic', 
+            status: 'searching',
+            providerId: null, 
+            'items.serviceId': { $in: myServiceIds }
+        };
+
+        // Tambahkan filter lokasi ($near) di top-level query (VALID)
+        if (provider.location && provider.location.coordinates && provider.location.coordinates.length === 2) {
+            basicQuery.location = {
+                $near: {
+                    $geometry: {
+                        type: "Point",
+                        coordinates: provider.location.coordinates
+                    },
+                    $maxDistance: BROADCAST_RADIUS_KM * 1000 // 15 KM
+                }
+            };
+        }
+        
+        basicOrdersPromise = Order.find(basicQuery)
+            .populate('userId', 'fullName profilePictureUrl phoneNumber')
+            .populate('items.serviceId', 'name category iconUrl')
+            .limit(20) // Limit hasil agar performa terjaga
+            .lean();
     }
+
+    // Jalankan kedua query secara paralel
+    const [directOrders, basicOrders] = await Promise.all([directOrdersPromise, basicOrdersPromise]);
+
+    // Gabungkan hasil dan urutkan berdasarkan waktu kunjungan (scheduledAt)
+    const combinedOrders = [...directOrders, ...basicOrders].sort((a, b) => {
+        return new Date(a.scheduledAt) - new Date(b.scheduledAt);
+    });
 
     res.json({ 
       message: 'Daftar order masuk berhasil diambil',
@@ -691,9 +696,10 @@ async function listIncomingOrders(req, res, next) {
         activeOrderCount: activeOrderCount,
         isBusy: activeOrderCount > 0
       },
-      data: filteredOrders 
+      data: combinedOrders 
     });
   } catch (error) {
+    console.error('[Incoming Orders Error]', error);
     next(error);
   }
 }

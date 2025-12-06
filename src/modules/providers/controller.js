@@ -421,6 +421,55 @@ async function toggleOnlineStatus(req, res, next) {
     next(error);
   }
 }
+
+// [BARU] Update Profil Provider (Bio, Alamat Operasional, Jam Kerja)
+async function updateProviderProfile(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const { bio, address, latitude, longitude, workingHours } = req.body;
+
+    const provider = await Provider.findOne({ userId });
+    if (!provider) {
+      return res.status(404).json({ message: 'Profil mitra tidak ditemukan' });
+    }
+
+    // Update Bio
+    if (bio !== undefined) provider.bio = bio;
+
+    // Update Lokasi & Alamat Operasional
+    if (address !== undefined) {
+        provider.location.address = address;
+    }
+
+    if (latitude !== undefined && longitude !== undefined) {
+        // Validasi angka
+        const lat = parseFloat(latitude);
+        const lng = parseFloat(longitude);
+        
+        if (!isNaN(lat) && !isNaN(lng)) {
+            provider.location.type = 'Point';
+            provider.location.coordinates = [lng, lat]; // MongoDB: [Long, Lat]
+        }
+    }
+
+    // Update Jam Kerja (Optional)
+    if (workingHours) {
+        if (workingHours.start) provider.workingHours.start = workingHours.start;
+        if (workingHours.end) provider.workingHours.end = workingHours.end;
+    }
+
+    await provider.save();
+
+    res.json({
+      messageKey: 'providers.profile.updated',
+      message: 'Profil operasional berhasil diperbarui',
+      data: provider
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 // [BARU] Fungsi Verifikasi Mitra (Admin Only)
 async function verifyProvider(req, res, next) {
   try {
@@ -472,5 +521,6 @@ module.exports = {
   updatePortfolio,
   updateProviderServices,
   toggleOnlineStatus,
+  updateProviderProfile,
   verifyProvider
 };

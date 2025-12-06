@@ -9,9 +9,11 @@ const router = express.Router();
 // PUT /api/providers/services (Update Services)
 router.put('/services', authenticate, controller.updateProviderServices);
 
-// --- TAMBAHKAN BARIS INI ---
 // PUT /api/providers/online-status (Toggle Online/Offline)
 router.put('/online-status', authenticate, controller.toggleOnlineStatus);
+
+// [BARU] PUT /api/providers/profile (Update Alamat Operasional & Bio)
+router.put('/profile', authenticate, controller.updateProviderProfile);
 
 // GET /api/providers/ (List semua - Public)
 router.get('/', controller.listProviders);
@@ -24,9 +26,6 @@ router.put('/availability', authenticate, validateUpdateAvailability, controller
 
 // PUT /api/providers/portfolio (Update Portfolio Images)
 router.put('/portfolio', authenticate, controller.updatePortfolio);
-
-// PUT /api/providers/services (Update Services)
-router.put('/services', authenticate, controller.updateProviderServices);
 
 // GET /api/providers/:id (Detail satu provider - Public)
 router.get('/:id', controller.getProviderById);
