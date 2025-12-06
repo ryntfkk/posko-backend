@@ -15,6 +15,35 @@ const { getIO } = require('../chat/socket');
 const DEFAULT_TIMEZONE = 'Asia/Jakarta';
 const DEFAULT_OFFSET = '+07:00';
 const BROADCAST_RADIUS_KM = 15;
+const CRON_BATCH_SIZE = 50; // Memproses 50 order per batch untuk hemat memori
+
+// [OPTIMIZATION] Cache formatter di luar class untuk performa (Singleton pattern)
+const dateFormatterCache = new Map();
+
+function getCachedFormatter(timeZone) {
+  if (!dateFormatterCache.has(timeZone)) {
+    try {
+      const formatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      });
+      dateFormatterCache.set(timeZone, formatter);
+    } catch (error) {
+      console.error(`[DATE_FORMAT] Invalid Timezone: ${timeZone}`, error);
+      // Fallback ke default timezone jika error
+      if (timeZone !== DEFAULT_TIMEZONE) {
+        return getCachedFormatter(DEFAULT_TIMEZONE);
+      }
+      return null;
+    }
+  }
+  return dateFormatterCache.get(timeZone);
+}
 
 class OrderService {
   // --- HELPER METHODS ---
@@ -25,30 +54,17 @@ class OrderService {
     const date = new Date(dateInput);
     if (isNaN(date.getTime())) return null;
 
-    try {
-      // Optimasi: Cache formatter jika memungkinkan, namun di sini kita keep simple dulu
-      const formatter = new Intl.DateTimeFormat('en-CA', {
-        timeZone,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false
-      });
+    const formatter = getCachedFormatter(timeZone);
+    if (!formatter) return null;
 
-      const parts = formatter.formatToParts(date);
-      const getPart = (type) => parts.find(p => p.type === type)?.value || '';
+    const parts = formatter.formatToParts(date);
+    const getPart = (type) => parts.find(p => p.type === type)?.value || '';
 
-      return {
-        dateOnly: `${getPart('year')}-${getPart('month')}-${getPart('day')}`,
-        timeStr: `${getPart('hour')}:${getPart('minute')}`,
-        fullDate: date
-      };
-    } catch (error) {
-      console.error(`Invalid Timezone: ${timeZone}`, error);
-      return null;
-    }
+    return {
+      dateOnly: `${getPart('year')}-${getPart('month')}-${getPart('day')}`,
+      timeStr: `${getPart('hour')}:${getPart('minute')}`,
+      fullDate: date
+    };
   }
 
   async getProviderActiveOrderCount(providerId) {
@@ -245,9 +261,15 @@ class OrderService {
 
   async createOrder(user, body) {
     const session = await mongoose.startSession();
-    session.startTransaction();
+    
+    // Variabel untuk menyimpan hasil operasi DB agar bisa diakses di luar blok try-catch DB
+    let createdOrder = null;
+    let providerUserIdToNotify = null;
+    let shouldBroadcastBasic = false;
 
     try {
+      session.startTransaction();
+
       const userId = user?.userId;
       if (!userId) throw new Error('Unauthorized');
 
@@ -261,7 +283,6 @@ class OrderService {
 
       let providerData = null;
       let providerSnapshot = {};
-      let providerUserId = null;
 
       if (orderType === 'direct') {
         if (!providerId) throw new Error('Provider ID wajib untuk Direct Order');
@@ -275,7 +296,7 @@ class OrderService {
         if (providerData.verificationStatus !== 'verified') throw new Error('Mitra ini belum terverifikasi.');
 
         if (providerData.userId) {
-          providerUserId = providerData.userId._id;
+          providerUserIdToNotify = providerData.userId._id;
           providerSnapshot = {
             fullName: providerData.userId.fullName,
             profilePictureUrl: providerData.userId.profilePictureUrl,
@@ -438,30 +459,44 @@ class OrderService {
         await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { orderId: order._id }, { session });
       }
 
+      // [FIX] Commit transaction SEBELUM logic socket/broadcast
       await session.commitTransaction();
-
-      // --- SOCKET & BROADCAST ---
-      const io = getIO();
-      if (io && orderType === 'direct' && providerUserId) {
-        io.to(providerUserId.toString()).emit('order_new', {
-          message: 'Anda menerima pesanan baru!',
-          order: order.toObject()
-        });
-      }
-
-      // [CRITICAL FIX] Use await here to prevent Serverless execution freeze
-      if (orderType === 'basic') {
-        await this.broadcastBasicOrderToNearbyProviders(order);
-      }
-
-      return order;
+      
+      createdOrder = order;
+      shouldBroadcastBasic = orderType === 'basic';
 
     } catch (error) {
-      await session.abortTransaction();
+      if (session.inTransaction()) {
+        await session.abortTransaction();
+      }
       throw error;
     } finally {
       session.endSession();
     }
+
+    // --- SOCKET & BROADCAST Logic (Di luar Transaction) ---
+    // Error di sini tidak akan membatalkan order yang sudah tersimpan
+    try {
+      const io = getIO();
+      if (createdOrder && io) {
+        if (orderType === 'direct' && providerUserIdToNotify) {
+          io.to(providerUserIdToNotify.toString()).emit('order_new', {
+            message: 'Anda menerima pesanan baru!',
+            order: createdOrder.toObject()
+          });
+        }
+      }
+
+      if (createdOrder && shouldBroadcastBasic) {
+        // [PERFORMANCE] Gunakan await agar async context terjaga, tapi error ditangkap lokal
+        await this.broadcastBasicOrderToNearbyProviders(createdOrder);
+      }
+    } catch (broadcastError) {
+      console.error('[ORDER POST-PROCESS ERROR] Notification failed:', broadcastError);
+      // Jangan throw error ke controller agar response tetap 201 Created
+    }
+
+    return createdOrder;
   }
 
   async getOrderById(orderId) {
@@ -510,7 +545,14 @@ class OrderService {
         'items.serviceId': { $in: myServiceIds }
       };
 
-      if (provider.location && provider.location.coordinates && provider.location.coordinates.length === 2) {
+      // [ROBUSTNESS] Validasi ketat untuk koordinat sebelum query spasial
+      if (
+        provider.location && 
+        provider.location.type === 'Point' && 
+        Array.isArray(provider.location.coordinates) && 
+        provider.location.coordinates.length === 2 &&
+        (provider.location.coordinates[0] !== 0 || provider.location.coordinates[1] !== 0)
+      ) {
         basicQuery.location = {
           $near: {
             $geometry: {
@@ -520,13 +562,16 @@ class OrderService {
             $maxDistance: BROADCAST_RADIUS_KM * 1000
           }
         };
-      }
 
-      basicOrdersPromise = Order.find(basicQuery)
-        .populate('userId', 'fullName profilePictureUrl phoneNumber')
-        .populate('items.serviceId', 'name category iconUrl')
-        .limit(20)
-        .lean();
+        basicOrdersPromise = Order.find(basicQuery)
+          .populate('userId', 'fullName profilePictureUrl phoneNumber')
+          .populate('items.serviceId', 'name category iconUrl')
+          .limit(20)
+          .lean();
+      } else {
+        // Fallback jika lokasi provider belum diset dengan benar
+        // console.warn(`Provider ${provider._id} has invalid location. Skipping proximity search.`);
+      }
     }
 
     const [directOrders, basicOrders] = await Promise.all([directOrdersPromise, basicOrdersPromise]);
@@ -763,6 +808,9 @@ class OrderService {
     if (cronSecret !== env.cronSecret) throw new Error('Forbidden: Invalid Cron Secret');
 
     const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    
+    // [MEMORY FIX] Fetch data tanpa menumpuk di memori (gunakan cursor atau proses bertahap)
+    // Di sini kita gunakan find biasa namun akan kita proses dengan chunking/batching
     const stuckOrders = await Order.find({
       status: 'waiting_approval',
       waitingApprovalAt: { $lt: twoDaysAgo },
@@ -771,25 +819,38 @@ class OrderService {
 
     console.log(`[CRON] Found ${stuckOrders.length} stuck orders.`);
 
-    // [CRITICAL FIX] Parallel Execution with Promise.allSettled
-    const results = await Promise.allSettled(stuckOrders.map(async (order) => {
-      // 1. Process Earnings
-      await this.processOrderCompletion(order._id);
+    let successCount = 0;
+    let failCount = 0;
+
+    // [BATCH PROCESSING] Proses per batch untuk mencegah Promise.allSettled memakan terlalu banyak memori
+    for (let i = 0; i < stuckOrders.length; i += CRON_BATCH_SIZE) {
+      const chunk = stuckOrders.slice(i, i + CRON_BATCH_SIZE);
       
-      // 2. Add System Note
-      await Order.findByIdAndUpdate(order._id, {
-        $set: { orderNote: (order.orderNote || '') + '\n[SYSTEM] Auto-completed due to inactivity.' }
+      const results = await Promise.allSettled(chunk.map(async (order) => {
+        // 1. Process Earnings
+        await this.processOrderCompletion(order._id);
+        
+        // 2. Add System Note
+        await Order.findByIdAndUpdate(order._id, {
+          $set: { orderNote: (order.orderNote || '') + '\n[SYSTEM] Auto-completed due to inactivity.' }
+        });
+        return order._id;
+      }));
+
+      // Update stats
+      successCount += results.filter(r => r.status === 'fulfilled').length;
+      failCount += results.filter(r => r.status === 'rejected').length;
+
+      // Log failures detail (opsional, agar log tidak banjir bisa dibatasi)
+      results.filter(r => r.status === 'rejected').forEach((r, idx) => {
+          console.error(`[CRON] Fail for order ${chunk[idx]._id}:`, r.reason);
       });
-      return order._id;
-    }));
 
-    const successCount = results.filter(r => r.status === 'fulfilled').length;
-    const failCount = results.filter(r => r.status === 'rejected').length;
-
-    // Log failures detail
-    results.filter(r => r.status === 'rejected').forEach((r, idx) => {
-        console.error(`[CRON] Fail for order ${stuckOrders[idx]._id}:`, r.reason);
-    });
+      // Sedikit jeda untuk memberi nafas ke Event Loop jika load sangat tinggi
+      if (i + CRON_BATCH_SIZE < stuckOrders.length) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
 
     return { found: stuckOrders.length, success: successCount, failed: failCount };
   }

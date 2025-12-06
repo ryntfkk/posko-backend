@@ -6,29 +6,52 @@ const Order = require('../orders/model');
 
 const { Types } = require('mongoose');
 
-// Helper: Ambil tanggal-tanggal yang sudah dibooking (Order Aktif)
+// [OPTIMIZATION] Gunakan Aggregation untuk ambil tanggal unik langsung dari DB
+// Mencegah fetching ribuan dokumen object hanya untuk mapping tanggal
 async function getBookedDates(providerId) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const orders = await Order.find({
-    providerId,
-    status: { $in: ['paid', 'accepted', 'on_the_way', 'working'] },
-    scheduledAt: { $gte: today }
-  }).select('scheduledAt');
+  // Sesuaikan timezone dengan kebutuhan project (WIB = +07:00)
+  const timezone = '+07:00';
 
-  return orders
-    .filter(o => o.scheduledAt)
-    .map(o => o.scheduledAt.toISOString().split('T')[0]);
+  const result = await Order.aggregate([
+    {
+      $match: {
+        providerId: new Types.ObjectId(providerId),
+        status: { $in: ['paid', 'accepted', 'on_the_way', 'working'] },
+        scheduledAt: { $gte: today }
+      }
+    },
+    {
+      $project: {
+        // Konversi tanggal langsung di database
+        dateStr: { 
+          $dateToString: { format: "%Y-%m-%d", date: "$scheduledAt", timezone } 
+        }
+      }
+    },
+    {
+      $group: {
+        _id: "$dateStr" // Group by date string untuk mendapatkan distinct dates
+      }
+    }
+  ]);
+
+  return result.map(r => r._id);
 }
 
-// Helper: Hitung total pesanan selesai
+// Helper: Hitung total pesanan selesai (Efficient Count)
 async function getCompletedOrdersCount(providerId) {
-  const count = await Order.countDocuments({
+  return await Order.countDocuments({
     providerId,
     status: 'completed'
   });
-  return count;
+}
+
+// Helper: Escape Regex untuk search yang aman
+function escapeRegex(text) {
+  return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
 }
 
 async function listProviders(req, res, next) {
@@ -39,25 +62,22 @@ async function listProviders(req, res, next) {
       sortBy = 'distance',
       limit = 10,
       page = 1,
-      // Parameter GPS opsional (untuk Guest)
       lat, 
       lng,
-      status // [BARU] Tambahkan parameter status dari query
+      status 
     } = req.query;
 
-    // [FIX] Deteksi Role Admin
     const { roles = [] } = req.user || {};
     const isAdmin = roles.includes('admin');
 
+    // 1. DETERMINASI LOKASI PUSAT (User DB atau Param GPS)
     let userCoordinates = null;
-    let locationSource = 'none'; // 'db', 'gps', 'none'
+    let locationSource = 'none';
 
-    // 1. CEK KOORDINAT USER (PRIORITAS: DATABASE)
     if (req.user && req.user.userId) {
         const customer = await User.findById(req.user.userId).select('location');
-        if (customer && customer.location && customer.location.coordinates && customer.location.coordinates.length === 2) {
+        if (customer?.location?.coordinates?.length === 2) {
             const [cLng, cLat] = customer.location.coordinates;
-            // Validasi bukan [0,0] default
             if (cLng !== 0 || cLat !== 0) {
                 userCoordinates = [cLng, cLat];
                 locationSource = 'db';
@@ -65,8 +85,6 @@ async function listProviders(req, res, next) {
         }
     }
 
-    // 2. CEK KOORDINAT GPS (FALLBACK: GUEST)
-    // Jika tidak dapat dari DB (Guest atau User belum set alamat), coba pakai query params
     if (!userCoordinates && lat && lng) {
         const pLat = parseFloat(lat);
         const pLng = parseFloat(lng);
@@ -76,51 +94,65 @@ async function listProviders(req, res, next) {
         }
     }
 
-    // [FIX] Tentukan Filter Dasar Berdasarkan Role
-    let baseQuery = {};
+    // 2. BANGUN INITIAL QUERY (Filter Early Strategy)
+    let initialMatch = {};
 
     if (isAdmin) {
-        // [ADMIN LOGIC]
-        // Admin boleh melihat semua data.
-        // Jika ada request filter status spesifik (selain 'all'), terapkan filter tersebut.
         if (status && status !== 'all') {
-            baseQuery.verificationStatus = status;
+            initialMatch.verificationStatus = status;
         }
-        // JANGAN pasang filter isOnline: true untuk admin, agar bisa lihat yg offline/pending
     } else {
-        // [CUSTOMER/GUEST LOGIC]
-        // Wajib hanya menampilkan yang verified DAN online
-        baseQuery = {
-            verificationStatus: 'verified',
-            isOnline: true
-        };
+        // Customer hanya lihat yang Verified & Online
+        initialMatch.verificationStatus = 'verified';
+        initialMatch.isOnline = true;
+    }
+
+    // [OPTIMIZATION] Pre-fetch Service IDs untuk Category Filter
+    // Jika ada filter kategori, cari dulu ID layanannya, lalu filter provider yang punya ID tsb.
+    // Ini jauh lebih cepat daripada join tabel Service di dalam pipeline.
+    if (category && typeof category === 'string' && category.trim() !== '') {
+        const normalizedCategory = decodeURIComponent(category).trim().replace(/-/g, ' ');
+        const categoryRegex = new RegExp(`^${escapeRegex(normalizedCategory)}$`, 'i');
+        
+        // Cari ID service yang relevan
+        const matchedServices = await Service.find({ category: categoryRegex }).select('_id').lean();
+        const serviceIds = matchedServices.map(s => s._id);
+
+        if (serviceIds.length > 0) {
+            initialMatch['services.serviceId'] = { $in: serviceIds };
+            // Filter juga agar hanya layanan aktif yang dianggap
+            initialMatch['services.isActive'] = true; 
+        } else {
+            // Jika kategori tidak ada di DB services, return kosong segera
+            return res.json({
+                messageKey: 'providers.list',
+                message: 'Tidak ada mitra untuk kategori ini',
+                meta: { locationSource, count: 0 },
+                data: []
+            });
+        }
     }
 
     const pipeline = [];
 
-    // 3. GEO-SPATIAL FILTER (Jika ada koordinat)
+    // 3. GEO-SPATIAL STAGE (Wajib paling atas jika dipakai)
     if (userCoordinates) {
       pipeline.push({
         $geoNear: {
-          near: {
-            type: "Point",
-            coordinates: userCoordinates
-          },
+          near: { type: "Point", coordinates: userCoordinates },
           key: "location", 
-          distanceField: "distance", // Output jarak dalam meter
+          distanceField: "distance",
           maxDistance: 20000, // 20 KM
           spherical: true,
-          query: baseQuery // [FIX] Gunakan filter dinamis
+          query: initialMatch // Filter awal diterapkan DI SINI (Index Scan)
         }
       });
     } else {
-      // 3.B. FILTER STANDAR (Jika tidak ada koordinat)
-      pipeline.push({
-        $match: baseQuery // [FIX] Gunakan filter dinamis
-      });
+      pipeline.push({ $match: initialMatch });
     }
 
-    // 4. RELASI KE DATA USER (Untuk ambil Nama, Foto, Bio personal mitra)
+    // 4. LOOKUPS (Join Late Strategy)
+    // Join User Info
     pipeline.push({
       $lookup: {
         from: 'users',
@@ -129,10 +161,9 @@ async function listProviders(req, res, next) {
         as: 'userInfo'
       }
     });
-
     pipeline.push({ $unwind: '$userInfo' });
 
-    // 5. RELASI KE LAYANAN
+    // Join Service Details
     pipeline.push({
       $lookup: {
         from: 'services',
@@ -142,79 +173,44 @@ async function listProviders(req, res, next) {
       }
     });
 
-    // 6. LOGIKA FILTER (Category & Search)
-    const matchConditions = [];
-
-    const isValidCategory = category &&
-      typeof category === 'string' &&
-      category.trim() !== '' &&
-      category.toLowerCase() !== 'undefined' &&
-      category.toLowerCase() !== 'null';
-
-    if (isValidCategory) {
-      const normalizedCategory = decodeURIComponent(category)
-        .toLowerCase()
-        .trim()
-        .replace(/-/g, ' ');
-
-      matchConditions.push({
-        'serviceDetails.category': { 
-            $regex: new RegExp(`^${normalizedCategory}$`, 'i') 
+    // 5. SEARCH FILTER (Regex Search)
+    // Search dilakukan setelah lookup karena kita butuh field nama user/nama service
+    if (search && typeof search === 'string' && search.trim() !== '') {
+      const searchRegex = new RegExp(escapeRegex(search.trim()), 'i');
+      pipeline.push({
+        $match: {
+          $or: [
+            { 'userInfo.fullName': { $regex: searchRegex } },
+            { 'location.address.city': { $regex: searchRegex } },
+            { 'location.address.district': { $regex: searchRegex } },
+            { 'serviceDetails.name': { $regex: searchRegex } },
+            { 'serviceDetails.category': { $regex: searchRegex } }
+          ]
         }
       });
     }
 
-    const isValidSearch = search &&
-      typeof search === 'string' &&
-      search.trim() !== '';
-
-    if (isValidSearch) {
-      const searchRegex = new RegExp(search.trim(), 'i');
-      matchConditions.push({
-        $or: [
-          { 'userInfo.fullName': { $regex: searchRegex } },
-          { 'location.address.city': { $regex: searchRegex } },
-          { 'location.address.district': { $regex: searchRegex } },
-          { 'serviceDetails.name': { $regex: searchRegex } },
-          { 'serviceDetails.category': { $regex: searchRegex } }
-        ]
-      });
-    }
-
-    if (matchConditions.length > 0) {
-      pipeline.push({ $match: { $and: matchConditions } });
-    }
-
-    // 7. SORTING
-    // Jika ada koordinat, default sort by distance. Jika tidak, sort by rating/terbaru
+    // 6. SORTING
     const sortOptions = {};
-    
-    if (sortBy === 'distance') {
-        if (userCoordinates) {
-            sortOptions.distance = 1;
-        } else {
-            // Fallback jika user minta sort distance tapi tidak ada lokasi -> Sort by Rating
-            sortOptions.rating = -1;
-        }
+    if (sortBy === 'distance' && userCoordinates) {
+        sortOptions.distance = 1;
+    } else if (sortBy === 'rating') {
+        sortOptions.rating = -1;
     } else if (sortBy === 'price_asc') {
         sortOptions['services.price'] = 1;
     } else if (sortBy === 'price_desc') {
         sortOptions['services.price'] = -1;
-    } else if (sortBy === 'rating') {
-        sortOptions.rating = -1;
     } else {
         // Default sort
         sortOptions[userCoordinates ? 'distance' : 'rating'] = userCoordinates ? 1 : -1;
     }
-
     pipeline.push({ $sort: sortOptions });
 
-    // 8. PAGINATION
+    // 7. PAGINATION & PROJECTION
     const skip = (parseInt(page) - 1) * parseInt(limit);
     pipeline.push({ $skip: skip });
     pipeline.push({ $limit: parseInt(limit) });
 
-    // 9. PROJECTION
     pipeline.push({
       $project: {
         _id: 1, 
@@ -231,12 +227,11 @@ async function listProviders(req, res, next) {
         services: 1, 
         rating: 1,
         isOnline: 1,
-        verificationStatus: 1, // Pastikan field ini dikembalikan
+        verificationStatus: 1,
         blockedDates: 1,
         portfolioImages: 1,
         totalCompletedOrders: 1,
         createdAt: 1,
-        // Distance hanya ada jika $geoNear dieksekusi
         distance: userCoordinates ? '$distance' : { $literal: null },
         operationalLocation: '$location' 
       }
@@ -244,6 +239,7 @@ async function listProviders(req, res, next) {
 
     const providers = await Provider.aggregate(pipeline);
 
+    // Populate ulang Service Details agar response lengkap (Aggregation project bisa memotong field)
     await Provider.populate(providers, {
       path: 'services.serviceId',
       select: 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent',
@@ -254,7 +250,7 @@ async function listProviders(req, res, next) {
       messageKey: 'providers.list',
       message: 'Berhasil memuat data mitra',
       meta: {
-          locationSource: locationSource, // Info untuk frontend: 'db', 'gps', atau 'none'
+          locationSource: locationSource,
           count: providers.length
       },
       data: providers
@@ -361,7 +357,6 @@ async function createProvider(req, res, next) {
   }
 }
 
-// Update Ketersediaan (Libur Manual)
 async function updateAvailability(req, res, next) {
   try {
     const userId = req.user.userId;
@@ -385,7 +380,6 @@ async function updateAvailability(req, res, next) {
   }
 }
 
-// Update Portfolio Images
 async function updatePortfolio(req, res, next) {
   try {
     const userId = req.user.userId;
@@ -413,18 +407,17 @@ async function updatePortfolio(req, res, next) {
   }
 }
 
-// Update Provider Services
 async function updateProviderServices(req, res, next) {
   try {
     const userId = req.user.userId;
     const { services } = req.body;
 
-    if (! Array.isArray(services)) {
+    if (!Array.isArray(services)) {
       return res.status(400).json({ message: 'Format layanan tidak valid' });
     }
 
     const provider = await Provider.findOne({ userId });
-    if (! provider) {
+    if (!provider) {
       return res.status(404).json({ message: 'Profil mitra tidak ditemukan' });
     }
 
@@ -444,7 +437,6 @@ async function updateProviderServices(req, res, next) {
   }
 }
 
-// Toggle Online Status
 async function toggleOnlineStatus(req, res, next) {
   try {
     const userId = req.user.userId;
@@ -468,11 +460,9 @@ async function toggleOnlineStatus(req, res, next) {
   }
 }
 
-// [FIXED] Update Profil Provider (Bio, Alamat Operasional, Jam Kerja)
 async function updateProviderProfile(req, res, next) {
   try {
     const userId = req.user.userId;
-    // [UPDATE] Menerima semua input field termasuk province
     const { bio, fullAddress, province, district, city, postalCode, latitude, longitude, workingHours } = req.body;
 
     const provider = await Provider.findOne({ userId });
@@ -480,53 +470,45 @@ async function updateProviderProfile(req, res, next) {
       return res.status(404).json({ message: 'Profil mitra tidak ditemukan' });
     }
 
-    // Update Bio
+    // Update fields sederhana
     if (bio !== undefined) provider.bio = bio;
 
-    // [FIX] Logika Defensive Update Alamat Detail
-    // Pastikan provider.location terinisialisasi
+    // [REFACTOR] Struktur Update Alamat yang Lebih Bersih & Aman
     if (!provider.location) {
         provider.location = { type: 'Point', coordinates: [0, 0], address: {} };
     }
 
-    // 1. Ambil state alamat saat ini (bisa object atau string lama)
-    let currentAddr = {};
-    const existingAddress = provider.location.address;
+    // Pastikan address object terinisialisasi
+    const existingAddress = (provider.location.address && typeof provider.location.address === 'object') 
+        ? provider.location.address 
+        : { fullAddress: typeof provider.location.address === 'string' ? provider.location.address : '' };
 
-    if (existingAddress && typeof existingAddress === 'object') {
-        currentAddr = existingAddress; 
-    } else if (typeof existingAddress === 'string') {
-        // Migrasi data lama (String) ke format baru
-        currentAddr = { fullAddress: existingAddress };
-    }
-
-    // 2. Susun object alamat baru dengan menimpa data lama jika ada input baru
-    const newAddress = {
-        fullAddress: fullAddress !== undefined ? fullAddress : (currentAddr.fullAddress || ''),
-        province: province !== undefined ? province : (currentAddr.province || ''),
-        city: city !== undefined ? city : (currentAddr.city || ''),
-        district: district !== undefined ? district : (currentAddr.district || ''),
-        postalCode: postalCode !== undefined ? postalCode : (currentAddr.postalCode || '')
+    // Merge data alamat baru
+    provider.location.address = {
+        fullAddress: fullAddress ?? existingAddress.fullAddress ?? '',
+        province: province ?? existingAddress.province ?? '',
+        city: city ?? existingAddress.city ?? '',
+        district: district ?? existingAddress.district ?? '',
+        postalCode: postalCode ?? existingAddress.postalCode ?? ''
     };
 
-    // 3. Timpa sepenuhnya untuk menghindari error casting Mongoose
-    provider.location.address = newAddress;
-
-    // Update Koordinat
+    // Update GeoJSON Coordinates
     if (latitude !== undefined && longitude !== undefined) {
         const lat = parseFloat(latitude);
         const lng = parseFloat(longitude);
         
         if (!isNaN(lat) && !isNaN(lng)) {
             provider.location.type = 'Point';
-            provider.location.coordinates = [lng, lat]; // MongoDB: [Long, Lat]
+            provider.location.coordinates = [lng, lat]; // [Long, Lat]
         }
     }
 
     // Update Jam Kerja
     if (workingHours) {
-        if (workingHours.start) provider.workingHours.start = workingHours.start;
-        if (workingHours.end) provider.workingHours.end = workingHours.end;
+        provider.workingHours = {
+            start: workingHours.start || provider.workingHours?.start,
+            end: workingHours.end || provider.workingHours?.end
+        };
     }
 
     await provider.save();
@@ -541,11 +523,10 @@ async function updateProviderProfile(req, res, next) {
   }
 }
 
-// [BARU] Fungsi Verifikasi Mitra (Admin Only)
 async function verifyProvider(req, res, next) {
   try {
-    const { id } = req.params; // ID Provider
-    const { status, rejectionReason } = req.body; // 'verified' | 'rejected'
+    const { id } = req.params;
+    const { status, rejectionReason } = req.body;
 
     if (!['verified', 'rejected'].includes(status)) {
       return res.status(400).json({ message: 'Status harus verified atau rejected' });
@@ -559,12 +540,11 @@ async function verifyProvider(req, res, next) {
     if (status === 'rejected') {
       provider.rejectionReason = rejectionReason || 'Dokumen tidak sesuai';
     } else {
-      provider.rejectionReason = ''; // Reset jika verified
+      provider.rejectionReason = '';
     }
 
     await provider.save();
 
-    // Jika verified, pastikan role user juga 'provider' DAN switch activeRole
     if (status === 'verified') {
       await User.findByIdAndUpdate(provider.userId, {
         $addToSet: { roles: 'provider' },
