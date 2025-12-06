@@ -1,3 +1,4 @@
+// src/modules/chat/model.js
 const mongoose = require('mongoose');
 
 const chatSchema = new mongoose.Schema(
@@ -6,7 +7,15 @@ const chatSchema = new mongoose.Schema(
     messages: [
       {
         sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-        content: String,
+        content: { type: String, default: '' },
+        attachment: {
+          url: { type: String },
+          type: { 
+            type: String, 
+            enum: ['image', 'video', 'document'], 
+            default: 'image' 
+          }
+        },
         sentAt: { type: Date, default: Date.now },
       },
     ],

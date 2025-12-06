@@ -479,7 +479,7 @@ class OrderService {
     try {
       const io = getIO();
       if (createdOrder && io) {
-        if (orderType === 'direct' && providerUserIdToNotify) {
+        if (createdOrder.orderType === 'direct' && providerUserIdToNotify) {
           io.to(providerUserIdToNotify.toString()).emit('order_new', {
             message: 'Anda menerima pesanan baru!',
             order: createdOrder.toObject()

@@ -42,46 +42,48 @@ function initSocket(httpServer) {
 
     // 3. Kirim Pesan
     socket.on('send_message', async (data) => {
-      // data: { roomId, content, receiverId }
+      // data: { roomId, content, attachment? }
       try {
-        const { roomId, content } = data;
+        const { roomId, content, attachment } = data; // [UPDATED] Ambil attachment
         const senderId = socket.user.userId;
 
-        // [FIX POINT 2] Validasi Kepemilikan Room (Security)
-        // Cek apakah room ada DAN pengirim adalah partisipan yang sah
+        // Validasi Kepemilikan Room (Security)
         const chatCheck = await Chat.findById(roomId);
         if (!chatCheck) {
           return console.error(`Chat room ${roomId} not found.`);
         }
 
-        // Convert ID ke string untuk perbandingan yang aman
         const isParticipant = chatCheck.participants.some(
           p => p.toString() === senderId
         );
 
         if (!isParticipant) {
-          console.error(`Unauthorized message attempt by ${senderId} to room ${roomId}`);
-          // Opsional: Emit error event ke pengirim
           return socket.emit('error_message', { message: 'Anda bukan anggota percakapan ini.' });
         }
 
-        // Simpan ke Database (Aman)
+        // Siapkan Payload Pesan
+        const messagePayload = {
+            sender: senderId,
+            content: content || '',
+            attachment: attachment || null // [UPDATED] Simpan attachment
+        };
+
+        // Simpan ke Database
         const chat = await Chat.findByIdAndUpdate(
           roomId, 
           { 
-            $push: { messages: { sender: senderId, content } } 
+            $push: { messages: messagePayload } 
           },
           { new: true }
         ).populate('participants', 'fullName profilePictureUrl');
 
-        // Broadcast pesan ke semua orang di room tersebut
+        // Broadcast pesan
         const newMessage = chat.messages[chat.messages.length - 1];
         
-        // Kirim event 'receive_message' ke room
         io.to(roomId).emit('receive_message', {
           roomId,
           message: newMessage,
-          senderName: socket.user.fullName // Opsional jika ada di token
+          senderName: socket.user.fullName
         });
 
       } catch (error) {
@@ -95,7 +97,6 @@ function initSocket(httpServer) {
   });
 }
 
-// [BARU] Helper untuk mengambil instance IO di file lain (Controller)
 function getIO() {
   if (!io) {
     console.warn("⚠️ Socket.io not initialized!");
