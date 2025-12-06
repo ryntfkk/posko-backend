@@ -64,6 +64,13 @@ const providerSchema = new mongoose.Schema(
       }
     },
 
+    // [PENTING] Menambahkan field isOnline agar sesuai dengan Controller & Data Database
+    isOnline: {
+      type: Boolean,
+      default: false,
+      index: true
+    },
+
     // [FIX] Mengganti isVerified (Boolean) dengan verificationStatus (String) agar sesuai Controller & Frontend
     verificationStatus: {
       type: String,
@@ -118,6 +125,7 @@ providerSchema.index({ location: '2dsphere' });
 // Index performa
 providerSchema.index({ 'services.serviceId': 1, 'services.isActive': 1 });
 providerSchema.index({ verificationStatus: 1 });
+providerSchema.index({ isOnline: 1 }); // Tambahkan index untuk isOnline agar query lebih cepat
 
 const Provider = mongoose.model('Provider', providerSchema);
 
