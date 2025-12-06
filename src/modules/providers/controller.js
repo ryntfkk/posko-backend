@@ -81,6 +81,7 @@ async function listProviders(req, res, next) {
             type: "Point",
             coordinates: userCoordinates
           },
+          key: "location", // [FIX] Menentukan field index secara eksplisit untuk mengatasi konflik index
           distanceField: "distance", // Output jarak dalam meter
           maxDistance: 20000, // 20 KM
           spherical: true,
