@@ -1,3 +1,4 @@
+// src/modules/providers/model.js
 const mongoose = require('mongoose');
 
 const providerServiceSchema = new mongoose.Schema({
@@ -68,7 +69,7 @@ const providerSchema = new mongoose.Schema(
     isOnline: {
       type: Boolean,
       default: false,
-      index: true
+      index: true // Index sudah didefinisikan di sini
     },
 
     // [FIX] Mengganti isVerified (Boolean) dengan verificationStatus (String) agar sesuai Controller & Frontend
@@ -76,7 +77,7 @@ const providerSchema = new mongoose.Schema(
       type: String,
       enum: ['pending', 'verified', 'rejected', 'suspended'],
       default: 'pending',
-      index: true
+      index: true // Index sudah didefinisikan di sini
     },
     rejectionReason: {
       type: String,
@@ -122,10 +123,12 @@ const providerSchema = new mongoose.Schema(
 // [CRITICAL] Index Geo-Spatial untuk pencarian jarak
 providerSchema.index({ location: '2dsphere' });
 
-// Index performa
+// Index performa (Compound Index tetap perlu didefinisikan manual)
 providerSchema.index({ 'services.serviceId': 1, 'services.isActive': 1 });
-providerSchema.index({ verificationStatus: 1 });
-providerSchema.index({ isOnline: 1 }); // Tambahkan index untuk isOnline agar query lebih cepat
+
+// [PERBAIKAN] Menghapus index duplikat karena sudah didefinisikan via `index: true` di schema options di atas.
+// providerSchema.index({ verificationStatus: 1 }); <--- DIHAPUS
+// providerSchema.index({ isOnline: 1 });           <--- DIHAPUS
 
 const Provider = mongoose.model('Provider', providerSchema);
 
