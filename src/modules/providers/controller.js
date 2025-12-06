@@ -41,7 +41,8 @@ async function listProviders(req, res, next) {
       page = 1,
       // Parameter GPS opsional (untuk Guest)
       lat, 
-      lng
+      lng,
+      status // [BARU] Tambahkan parameter status dari query
     } = req.query;
 
     // [FIX] Deteksi Role Admin
@@ -76,10 +77,19 @@ async function listProviders(req, res, next) {
     }
 
     // [FIX] Tentukan Filter Dasar Berdasarkan Role
-    // Jika Admin: Ambil semua data (filter kosong)
-    // Jika Customer/Guest: Hanya yang verified dan online
     let baseQuery = {};
-    if (!isAdmin) {
+
+    if (isAdmin) {
+        // [ADMIN LOGIC]
+        // Admin boleh melihat semua data.
+        // Jika ada request filter status spesifik (selain 'all'), terapkan filter tersebut.
+        if (status && status !== 'all') {
+            baseQuery.verificationStatus = status;
+        }
+        // JANGAN pasang filter isOnline: true untuk admin, agar bisa lihat yg offline/pending
+    } else {
+        // [CUSTOMER/GUEST LOGIC]
+        // Wajib hanya menampilkan yang verified DAN online
         baseQuery = {
             verificationStatus: 'verified',
             isOnline: true
