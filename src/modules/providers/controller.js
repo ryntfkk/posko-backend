@@ -44,6 +44,10 @@ async function listProviders(req, res, next) {
       lng
     } = req.query;
 
+    // [FIX] Deteksi Role Admin
+    const { roles = [] } = req.user || {};
+    const isAdmin = roles.includes('admin');
+
     let userCoordinates = null;
     let locationSource = 'none'; // 'db', 'gps', 'none'
 
@@ -71,6 +75,17 @@ async function listProviders(req, res, next) {
         }
     }
 
+    // [FIX] Tentukan Filter Dasar Berdasarkan Role
+    // Jika Admin: Ambil semua data (filter kosong)
+    // Jika Customer/Guest: Hanya yang verified dan online
+    let baseQuery = {};
+    if (!isAdmin) {
+        baseQuery = {
+            verificationStatus: 'verified',
+            isOnline: true
+        };
+    }
+
     const pipeline = [];
 
     // 3. GEO-SPATIAL FILTER (Jika ada koordinat)
@@ -81,23 +96,17 @@ async function listProviders(req, res, next) {
             type: "Point",
             coordinates: userCoordinates
           },
-          key: "location", // [FIX] Menentukan field index secara eksplisit untuk mengatasi konflik index
+          key: "location", 
           distanceField: "distance", // Output jarak dalam meter
           maxDistance: 20000, // 20 KM
           spherical: true,
-          query: {
-            verificationStatus: 'verified', // [FIX] Hanya Mitra Terverifikasi
-            isOnline: true // [FIX] Hanya Mitra Online
-          }
+          query: baseQuery // [FIX] Gunakan filter dinamis
         }
       });
     } else {
       // 3.B. FILTER STANDAR (Jika tidak ada koordinat)
       pipeline.push({
-        $match: {
-            verificationStatus: 'verified',
-            isOnline: true
-        }
+        $match: baseQuery // [FIX] Gunakan filter dinamis
       });
     }
 
@@ -212,6 +221,7 @@ async function listProviders(req, res, next) {
         services: 1, 
         rating: 1,
         isOnline: 1,
+        verificationStatus: 1, // Pastikan field ini dikembalikan
         blockedDates: 1,
         portfolioImages: 1,
         totalCompletedOrders: 1,
