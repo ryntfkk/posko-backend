@@ -229,7 +229,12 @@ class OrderService {
 
   async listOrders(user, query) {
     const { roles = [], userId } = user || {};
-    const { view } = query;
+    const { view, page = 1, limit = 10 } = query;
+
+    // [PERFORMANCE FIX] Hitung Pagination Variables
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.max(1, parseInt(limit));
+    const skip = (pageNum - 1) * limitNum;
 
     let match = { userId: new mongoose.Types.ObjectId(userId) };
 
@@ -239,7 +244,7 @@ class OrderService {
       if (provider) {
         match = { providerId: new mongoose.Types.ObjectId(provider._id) };
       } else {
-        return [];
+        return { data: [], meta: { total: 0, page: pageNum, limit: limitNum } };
       }
     }
 
@@ -247,8 +252,17 @@ class OrderService {
       match = {};
     }
 
+    // [PERFORMANCE FIX] Hitung Total Dokumen untuk Metadata (Opsional: Bisa dihapus jika terlalu berat)
+    const totalDocs = await Order.countDocuments(match);
+
     const pipeline = [
       { $match: match },
+      { $sort: { createdAt: -1 } },
+      
+      // [PERFORMANCE FIX] Skip & Limit SEBELUM Lookup
+      { $skip: skip },
+      { $limit: limitNum },
+
       // Lookup for Customer Info
       {
         $lookup: {
@@ -392,12 +406,21 @@ class OrderService {
             },
           }
         }
-      },
-      { $sort: { createdAt: -1 } }
+      }
     ];
 
-    // Gunakan allowDiskUse: true untuk aggregation yang sangat besar, tapi biarkan false dulu
-    return await Order.aggregate(pipeline);
+    const data = await Order.aggregate(pipeline);
+
+    // [PERFORMANCE FIX] Mengembalikan struktur dengan Metadata
+    return {
+      data,
+      meta: {
+        total: totalDocs,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalDocs / limitNum)
+      }
+    };
   }
 
   async createOrder(user, body) {
@@ -955,24 +978,25 @@ class OrderService {
 
     const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
     
-    // [MEMORY FIX] Fetch data tanpa menumpuk di memori (gunakan cursor atau proses bertahap)
-    // Di sini kita gunakan find biasa namun akan kita proses dengan chunking/batching
-    const stuckOrders = await Order.find({
+    // [MEMORY FIX] Menggunakan Cursor untuk streaming data
+    // Ini jauh lebih aman daripada mengambil semua data ke RAM
+    const cursor = Order.find({
       status: 'waiting_approval',
       waitingApprovalAt: { $lt: twoDaysAgo },
       isEarningsProcessed: { $ne: true }
-    });
+    }).cursor();
 
-    console.log(`[CRON] Found ${stuckOrders.length} stuck orders.`);
+    console.log(`[CRON] Starting auto-complete process...`);
 
     let successCount = 0;
     let failCount = 0;
+    let processedCount = 0;
 
-    // [BATCH PROCESSING] Proses per batch untuk mencegah Promise.allSettled memakan terlalu banyak memori
-    for (let i = 0; i < stuckOrders.length; i += CRON_BATCH_SIZE) {
-      const chunk = stuckOrders.slice(i, i + CRON_BATCH_SIZE);
-      
-      const results = await Promise.allSettled(chunk.map(async (order) => {
+    // Iterasi satu per satu menggunakan cursor
+    for (let order = await cursor.next(); order != null; order = await cursor.next()) {
+      try {
+        processedCount++;
+        
         // 1. Process Earnings
         await this.processOrderCompletion(order._id);
         
@@ -980,25 +1004,15 @@ class OrderService {
         await Order.findByIdAndUpdate(order._id, {
           $set: { orderNote: (order.orderNote || '') + '\n[SYSTEM] Auto-completed due to inactivity.' }
         });
-        return order._id;
-      }));
 
-      // Update stats
-      successCount += results.filter(r => r.status === 'fulfilled').length;
-      failCount += results.filter(r => r.status === 'rejected').length;
-
-      // Log failures detail (opsional, agar log tidak banjir bisa dibatasi)
-      results.filter(r => r.status === 'rejected').forEach((r, idx) => {
-          console.error(`[CRON] Fail for order ${chunk[idx]._id}:`, r.reason);
-      });
-
-      // Sedikit jeda untuk memberi nafas ke Event Loop jika load sangat tinggi
-      if (i + CRON_BATCH_SIZE < stuckOrders.length) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+        successCount++;
+      } catch (error) {
+        console.error(`[CRON] Fail for order ${order._id}:`, error.message);
+        failCount++;
       }
     }
 
-    return { found: stuckOrders.length, success: successCount, failed: failCount };
+    return { found: processedCount, success: successCount, failed: failCount };
   }
 }
 

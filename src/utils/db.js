@@ -8,15 +8,16 @@ if (!cached) {
   cached = global.mongoose = { conn: null, promise: null };
 }
 
-// Mongoose connection options optimized for Vercel serverless
+// Mongoose connection options optimized for Vercel serverless but flexible for others
 const mongooseOptions = {
   bufferCommands: false, // Fail fast if not connected
-  serverSelectionTimeoutMS: 10000, // [UPDATED] Lower timeout to fail faster (10s)
+  serverSelectionTimeoutMS: 10000, // Lower timeout to fail faster (10s)
   socketTimeoutMS: 45000,
-  maxPoolSize: 2, // [ARCHITECTURAL FIX] Disesuaikan untuk Serverless/FaaS agar menghindari Connection Storm (turun dari 10 ke 2)
-  minPoolSize: 0, // [UPDATED] Set to 0 to prevent stale connections in serverless
+  // [ARCHITECTURAL FIX] Menggunakan Environment Variable atau Default yang lebih masuk akal (10)
+  maxPoolSize: process.env.MONGO_MAX_POOL_SIZE ? parseInt(process.env.MONGO_MAX_POOL_SIZE) : 10,
+  minPoolSize: 0, // Set to 0 to prevent stale connections in serverless
   maxIdleTimeMS: 10000,
-  connectTimeoutMS: 10000, // [UPDATED] Lower connection timeout
+  connectTimeoutMS: 10000, // Lower connection timeout
   heartbeatFrequencyMS: 10000,
 };
 
@@ -25,7 +26,7 @@ const mongooseOptions = {
  * @returns {Promise<any>} Mongoose connection
  */
 const connectDB = async () => {
-  // [UPDATED] Check if connection is actually alive (readyState === 1)
+  // Check if connection is actually alive (readyState === 1)
   if (cached.conn) {
     if (mongoose.connection.readyState === 1) {
       return cached.conn;
@@ -106,7 +107,7 @@ if (mongoose.connection.listeners('connected').length === 0) {
 
   mongoose.connection.on('disconnected', () => {
     console.log('📊 MongoDB connection disconnected');
-    // [UPDATED] Clear cache on explicit disconnect
+    // Clear cache on explicit disconnect
     cached.conn = null;
   });
 

@@ -4,14 +4,15 @@ const OrderService = require('./service');
 // 1. LIST ALL ORDERS
 async function listOrders(req, res, next) {
   try {
-    const orders = await OrderService.listOrders(req.user, req.query);
+    // [FIX] Destructure result dari Service (data & meta)
+    const { data, meta } = await OrderService.listOrders(req.user, req.query);
     
-    // Mempertahankan format response asli untuk frontend
     const messageKey = 'orders.list';
     res.json({ 
       messageKey, 
       message: req.t ? req.t(messageKey) : 'List Orders', 
-      data: orders 
+      data: data, // Kirim array data murni
+      meta: meta  // Kirim metadata pagination
     });
   } catch (error) {
     next(error);

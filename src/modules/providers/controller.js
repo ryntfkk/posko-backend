@@ -1,302 +1,16 @@
 // src/modules/providers/controller.js
-const Provider = require('./model');
-const User = require('../../models/User');
-const Service = require('../services/model');
-const Order = require('../orders/model');
-
-const { Types } = require('mongoose');
-
-// [OPTIMIZATION] Gunakan Aggregation untuk ambil tanggal unik langsung dari DB
-// Mencegah fetching ribuan dokumen object hanya untuk mapping tanggal
-async function getBookedDates(providerId) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  // [OPTIMIZATION FIX] Tambahkan batas atas: 6 bulan dari sekarang
-  const sixMonthsFromNow = new Date();
-  sixMonthsFromNow.setMonth(today.getMonth() + 6);
-  sixMonthsFromNow.setDate(sixMonthsFromNow.getDate() + 1); // Batas aman untuk inklusivitas hari
-  sixMonthsFromNow.setHours(0, 0, 0, 0); 
-  
-  // Sesuaikan timezone dengan kebutuhan project (WIB = +07:00)
-  const timezone = '+07:00';
-
-  const result = await Order.aggregate([
-    {
-      $match: {
-        providerId: new Types.ObjectId(providerId),
-        // [ROBUSTNESS] Tambahkan 'waiting_approval' agar hari itu terhitung 'booked'
-        status: { $in: ['paid', 'accepted', 'on_the_way', 'working', 'waiting_approval'] }, 
-        scheduledAt: { 
-          $gte: today,
-          $lte: sixMonthsFromNow // Batas atas ditambahkan
-        }
-      }
-    },
-    {
-      $project: {
-        // Konversi tanggal langsung di database
-        dateStr: { 
-          $dateToString: { format: "%Y-%m-%d", date: "$scheduledAt", timezone } 
-        }
-      }
-    },
-    {
-      $group: {
-        _id: "$dateStr" // Group by date string untuk mendapatkan distinct dates
-      }
-    }
-  ]);
-
-  return result.map(r => r._id);
-}
-
-// Helper: Hitung total pesanan selesai (Efficient Count)
-async function getCompletedOrdersCount(providerId) {
-  return await Order.countDocuments({
-    providerId,
-    status: 'completed'
-  });
-}
-
-// Helper: Escape Regex untuk search yang aman
-function escapeRegex(text) {
-  return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
-}
+const ProviderService = require('./service');
 
 async function listProviders(req, res, next) {
   try {
-    const {
-      category,
-      search,
-      sortBy = 'distance',
-      limit = 10,
-      page = 1,
-      lat, 
-      lng,
-      status 
-    } = req.query;
-
-    const { roles = [] } = req.user || {};
-    const isAdmin = roles.includes('admin');
-
-    // 1. DETERMINASI LOKASI PUSAT (User DB atau Param GPS)
-    let userCoordinates = null;
-    let locationSource = 'none';
-
-    if (req.user && req.user.userId) {
-        const customer = await User.findById(req.user.userId).select('location');
-        if (customer?.location?.coordinates?.length === 2) {
-            const [cLng, cLat] = customer.location.coordinates;
-            if (cLng !== 0 || cLat !== 0) {
-                userCoordinates = [cLng, cLat];
-                locationSource = 'db';
-            }
-        }
-    }
-
-    if (!userCoordinates && lat && lng) {
-        const pLat = parseFloat(lat);
-        const pLng = parseFloat(lng);
-        if (!isNaN(pLat) && !isNaN(pLng)) {
-            userCoordinates = [pLng, pLat];
-            locationSource = 'gps';
-        }
-    }
-
-    // 2. BANGUN INITIAL QUERY (Filter Early Strategy)
-    let initialMatch = {};
-
-    if (isAdmin) {
-        if (status && status !== 'all') {
-            initialMatch.verificationStatus = status;
-        }
-    } else {
-        // Customer hanya lihat yang Verified & Online
-        initialMatch.verificationStatus = 'verified';
-        initialMatch.isOnline = true;
-    }
-
-    // [OPTIMIZATION] Pre-fetch Service IDs untuk Category Filter
-    // Jika ada filter kategori, cari dulu ID layanannya, lalu filter provider yang punya ID tsb.
-    // Ini jauh lebih cepat daripada join tabel Service di dalam pipeline.
-    let searchServiceIds = [];
-    if (category && typeof category === 'string' && category.trim() !== '') {
-        const normalizedCategory = decodeURIComponent(category).trim().replace(/-/g, ' ');
-        const categoryRegex = new RegExp(`^${escapeRegex(normalizedCategory)}$`, 'i');
-        
-        // Cari ID service yang relevan
-        const matchedServices = await Service.find({ category: categoryRegex }).select('_id').lean();
-        searchServiceIds = matchedServices.map(s => s._id);
-
-        if (searchServiceIds.length > 0) {
-            initialMatch['services.serviceId'] = { $in: searchServiceIds };
-            // Filter juga agar hanya layanan aktif yang dianggap
-            initialMatch['services.isActive'] = true; 
-        } else {
-            // Jika kategori tidak ada di DB services, return kosong segera
-            return res.json({
-                messageKey: 'providers.list',
-                message: 'Tidak ada mitra untuk kategori ini',
-                meta: { locationSource, count: 0 },
-                data: []
-            });
-        }
-    }
-
-    const pipeline = [];
-    let searchUserIds = []; // Untuk menyimpan ID User dari Pre-query Search
-
-    // 3. OPTIMIZATION: Handle Text Search (Pre-query Inverted Index)
-    if (search && typeof search === 'string' && search.trim() !== '') {
-        const searchRegex = new RegExp(escapeRegex(search.trim()), 'i');
-
-        // [OPTIMIZATION FIX] Cek user yang cocok dengan nama DULU (Manfaatkan Index di collection Users)
-        const matchingUsers = await User.find({ fullName: { $regex: searchRegex } }).select('_id').lean();
-        searchUserIds = matchingUsers.map(u => u._id);
-
-        // Jika tidak ada hasil, buat query match yang sangat ketat agar pipeline cepat selesai.
-        if (searchUserIds.length === 0) {
-            initialMatch.$or = [
-                { 'location.address.city': { $regex: searchRegex } },
-                { 'location.address.district': { $regex: searchRegex } },
-            ];
-        } else {
-            // Gabungkan filter user ID dengan filter lokasi
-            initialMatch.$or = [
-                { userId: { $in: searchUserIds } },
-                { 'location.address.city': { $regex: searchRegex } },
-                { 'location.address.district': { $regex: searchRegex } },
-            ];
-        }
-    }
-
-    // 4. GEO-SPATIAL STAGE (Wajib paling atas jika dipakai)
-    if (userCoordinates) {
-      pipeline.push({
-        $geoNear: {
-          near: { type: "Point", coordinates: userCoordinates },
-          key: "location", 
-          distanceField: "distance",
-          maxDistance: 20000, // 20 KM
-          spherical: true,
-          query: initialMatch // Filter awal diterapkan DI SINI (Index Scan)
-        }
-      });
-    } else {
-      pipeline.push({ $match: initialMatch });
-    }
-
-    // 5. LOOKUPS (Join Late Strategy)
-    // Join User Info
-    pipeline.push({
-      $lookup: {
-        from: 'users',
-        localField: 'userId',
-        foreignField: '_id',
-        as: 'userInfo'
-      }
-    });
-    pipeline.push({ $unwind: '$userInfo' });
-
-    // Join Service Details
-    pipeline.push({
-      $lookup: {
-        from: 'services',
-        localField: 'services.serviceId',
-        foreignField: '_id',
-        as: 'serviceDetails'
-      }
-    });
-
-    // 6. SEARCH FILTER FINAL (Regex Search pada hasil Lookup)
-    // Hanya lakukan search pada hasil lookup jika ada kata kunci pencarian
-    if (search && typeof search === 'string' && search.trim() !== '') {
-      const searchRegex = new RegExp(escapeRegex(search.trim()), 'i');
-      
-      // Filter final untuk service name/category
-      // Catatan: Filtering berdasarkan 'userInfo.fullName' sudah dilakukan di tahap 3,
-      // tetapi perlu di-re-filter untuk kasus di mana serviceDetails.name cocok.
-      pipeline.push({
-        $match: {
-          $or: [
-            // Filter user yang tidak ter-cover oleh pre-query (optional, tapi aman)
-            { 'userInfo.fullName': { $regex: searchRegex } }, 
-            { 'location.address.city': { $regex: searchRegex } },
-            { 'location.address.district': { $regex: searchRegex } },
-            { 'serviceDetails.name': { $regex: searchRegex } },
-            { 'serviceDetails.category': { $regex: searchRegex } }
-          ]
-        }
-      });
-    }
-
-    // 7. SORTING
-    const sortOptions = {};
-    if (sortBy === 'distance' && userCoordinates) {
-        sortOptions.distance = 1;
-    } else if (sortBy === 'rating') {
-        sortOptions.rating = -1;
-    } else if (sortBy === 'price_asc') {
-        sortOptions['services.price'] = 1;
-    } else if (sortBy === 'price_desc') {
-        sortOptions['services.price'] = -1;
-    } else {
-        // Default sort
-        sortOptions[userCoordinates ? 'distance' : 'rating'] = userCoordinates ? 1 : -1;
-    }
-    pipeline.push({ $sort: sortOptions });
-
-    // 8. PAGINATION & PROJECTION
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    pipeline.push({ $skip: skip });
-    pipeline.push({ $limit: parseInt(limit) });
-
-    pipeline.push({
-      $project: {
-        _id: 1, 
-        userId: { 
-          _id: '$userInfo._id',
-          fullName: '$userInfo.fullName',
-          email: '$userInfo.email',
-          profilePictureUrl: '$userInfo.profilePictureUrl',
-          address: '$userInfo.address', 
-          location: '$userInfo.location',
-          bio: '$userInfo.bio',
-          phoneNumber: '$userInfo.phoneNumber'
-        },
-        services: 1, 
-        rating: 1,
-        isOnline: 1,
-        verificationStatus: 1,
-        blockedDates: 1,
-        portfolioImages: 1,
-        totalCompletedOrders: 1,
-        createdAt: 1,
-        distance: userCoordinates ? '$distance' : { $literal: null },
-        operationalLocation: '$location' 
-      }
-    });
-
-    const providers = await Provider.aggregate(pipeline);
-
-    // Populate ulang Service Details agar response lengkap (Aggregation project bisa memotong field)
-    await Provider.populate(providers, {
-      path: 'services.serviceId',
-      select: 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent',
-      model: Service
-    });
+    const result = await ProviderService.listProviders(req.user, req.query);
 
     res.json({
       messageKey: 'providers.list',
       message: 'Berhasil memuat data mitra',
-      meta: {
-          locationSource: locationSource,
-          count: providers.length
-      },
-      data: providers
+      meta: result.meta,
+      data: result.data
     });
-
   } catch (error) {
     console.error('[PROVIDERS ERROR]', error);
     next(error);
@@ -305,38 +19,16 @@ async function listProviders(req, res, next) {
 
 async function getProviderById(req, res, next) {
   try {
-    const { id } = req.params;
-
-    if (!Types.ObjectId.isValid(id)) {
-      return res.status(404).json({ message: 'Mitra tidak ditemukan' });
-    }
-
-    const provider = await Provider.findById(id)
-      .populate({
-        path: 'userId',
-        select: 'fullName profilePictureUrl address location bio phoneNumber'
-      })
-      .populate({
-        path: 'services.serviceId',
-        select: 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent'
-      });
+    const provider = await ProviderService.getProviderById(req.params.id);
 
     if (!provider) {
       return res.status(404).json({ message: 'Mitra tidak ditemukan' });
     }
 
-    const bookedDates = await getBookedDates(provider._id);
-    const totalCompletedOrders = await getCompletedOrdersCount(provider._id);
-
-    const providerData = provider.toObject();
-    providerData.bookedDates = bookedDates;
-    providerData.totalCompletedOrders = totalCompletedOrders;
-    delete providerData.schedule; 
-
     res.json({
       messageKey: 'providers.detail',
       message: 'Detail mitra ditemukan',
-      data: providerData
+      data: provider
     });
   } catch (error) {
     next(error);
@@ -345,26 +37,16 @@ async function getProviderById(req, res, next) {
 
 async function getProviderMe(req, res, next) {
   try {
-    const userId = req.user.userId;
-    const provider = await Provider.findOne({ userId })
-      .populate('services.serviceId', 'name category iconUrl basePrice unit unitLabel displayUnit shortDescription description estimatedDuration includes excludes requirements isPromo promoPrice discountPercent');
+    const provider = await ProviderService.getProviderMe(req.user.userId);
 
     if (!provider) {
       return res.status(404).json({ message: 'Profil Mitra belum dibuat' });
     }
 
-    const bookedDates = await getBookedDates(provider._id);
-    const totalCompletedOrders = await getCompletedOrdersCount(provider._id);
-
-    const providerData = provider.toObject();
-    providerData.bookedDates = bookedDates;
-    providerData.totalCompletedOrders = totalCompletedOrders;
-    delete providerData.schedule; 
-
     res.json({
       messageKey: 'providers.me',
       message: 'Profil mitra ditemukan',
-      data: providerData
+      data: provider
     });
   } catch (error) {
     next(error);
@@ -373,20 +55,7 @@ async function getProviderMe(req, res, next) {
 
 async function createProvider(req, res, next) {
   try {
-    const { userId, services = [] } = req.body;
-
-    const exist = await Provider.findOne({ userId });
-    if (exist) {
-      return res.status(400).json({ message: 'User ini sudah terdaftar sebagai provider' });
-    }
-
-    const provider = new Provider({ userId, services });
-    await provider.save();
-
-    await User.findByIdAndUpdate(userId, {
-      $addToSet: { roles: 'provider' },
-      activeRole: 'provider'
-    });
+    const provider = await ProviderService.createProvider(req.body.userId, req.body.services);
 
     res.status(201).json({
       messageKey: 'providers.created',
@@ -394,22 +63,17 @@ async function createProvider(req, res, next) {
       data: provider
     });
   } catch (error) {
+    // Handle specific error message for existing provider
+    if (error.message === 'User ini sudah terdaftar sebagai provider') {
+        return res.status(400).json({ message: error.message });
+    }
     next(error);
   }
 }
 
 async function updateAvailability(req, res, next) {
   try {
-    const userId = req.user.userId;
-    const { blockedDates } = req.body;
-
-    const provider = await Provider.findOne({ userId });
-    if (!provider) {
-      return res.status(404).json({ message: 'Profil mitra tidak ditemukan' });
-    }
-
-    provider.blockedDates = blockedDates;
-    await provider.save();
+    const blockedDates = await ProviderService.updateAvailability(req.user.userId, req.body.blockedDates);
 
     res.json({
       messageKey: 'providers.availability.updated',
@@ -417,26 +81,14 @@ async function updateAvailability(req, res, next) {
       data: blockedDates
     });
   } catch (error) {
+    if (error.message === 'Profil mitra tidak ditemukan') return res.status(404).json({ message: error.message });
     next(error);
   }
 }
 
 async function updatePortfolio(req, res, next) {
   try {
-    const userId = req.user.userId;
-    const { portfolioImages } = req.body;
-
-    if (!Array.isArray(portfolioImages)) {
-      return res.status(400).json({ message: 'Format portfolio tidak valid' });
-    }
-
-    const provider = await Provider.findOne({ userId });
-    if (!provider) {
-      return res.status(404).json({ message: 'Profil mitra tidak ditemukan' });
-    }
-
-    provider.portfolioImages = portfolioImages;
-    await provider.save();
+    const provider = await ProviderService.updatePortfolio(req.user.userId, req.body.portfolioImages);
 
     res.json({
       messageKey: 'providers.portfolio.updated',
@@ -444,29 +96,15 @@ async function updatePortfolio(req, res, next) {
       data: provider
     });
   } catch (error) {
+    if (error.message === 'Format portfolio tidak valid') return res.status(400).json({ message: error.message });
+    if (error.message === 'Profil mitra tidak ditemukan') return res.status(404).json({ message: error.message });
     next(error);
   }
 }
 
 async function updateProviderServices(req, res, next) {
   try {
-    const userId = req.user.userId;
-    const { services } = req.body;
-
-    if (!Array.isArray(services)) {
-      return res.status(400).json({ message: 'Format layanan tidak valid' });
-    }
-
-    const provider = await Provider.findOne({ userId });
-    if (!provider) {
-      return res.status(404).json({ message: 'Profil mitra tidak ditemukan' });
-    }
-
-    provider.services = services;
-    await provider.save();
-
-    const updatedProvider = await Provider.findOne({ userId })
-      .populate('services.serviceId', 'name category iconUrl basePrice unit unitLabel');
+    const updatedProvider = await ProviderService.updateProviderServices(req.user.userId, req.body.services);
 
     res.json({
       messageKey: 'providers.services.updated',
@@ -474,85 +112,30 @@ async function updateProviderServices(req, res, next) {
       data: updatedProvider
     });
   } catch (error) {
+    if (error.message === 'Format layanan tidak valid') return res.status(400).json({ message: error.message });
+    if (error.message === 'Profil mitra tidak ditemukan') return res.status(404).json({ message: error.message });
     next(error);
   }
 }
 
 async function toggleOnlineStatus(req, res, next) {
   try {
-    const userId = req.user.userId;
-    const { isOnline } = req.body;
-
-    const provider = await Provider.findOne({ userId });
-    if (!provider) {
-      return res.status(404).json({ message: 'Profil mitra tidak ditemukan' });
-    }
-
-    provider.isOnline = isOnline;
-    await provider.save();
+    const isOnline = await ProviderService.toggleOnlineStatus(req.user.userId, req.body.isOnline);
 
     res.json({
       messageKey: 'providers.status.updated',
       message: `Status berhasil diubah menjadi ${isOnline ? 'Online' : 'Offline'}`,
-      data: { isOnline: provider.isOnline }
+      data: { isOnline }
     });
   } catch (error) {
+    if (error.message === 'Profil mitra tidak ditemukan') return res.status(404).json({ message: error.message });
     next(error);
   }
 }
 
 async function updateProviderProfile(req, res, next) {
   try {
-    const userId = req.user.userId;
-    const { bio, fullAddress, province, district, city, postalCode, latitude, longitude, workingHours } = req.body;
-
-    const provider = await Provider.findOne({ userId });
-    if (!provider) {
-      return res.status(404).json({ message: 'Profil mitra tidak ditemukan' });
-    }
-
-    // Update fields sederhana
-    if (bio !== undefined) provider.bio = bio;
-
-    // [REFACTOR] Struktur Update Alamat yang Lebih Bersih & Aman
-    if (!provider.location) {
-        provider.location = { type: 'Point', coordinates: [0, 0], address: {} };
-    }
-
-    // Pastikan address object terinisialisasi
-    const existingAddress = (provider.location.address && typeof provider.location.address === 'object') 
-        ? provider.location.address 
-        : { fullAddress: typeof provider.location.address === 'string' ? provider.location.address : '' };
-
-    // Merge data alamat baru
-    provider.location.address = {
-        fullAddress: fullAddress ?? existingAddress.fullAddress ?? '',
-        province: province ?? existingAddress.province ?? '',
-        city: city ?? existingAddress.city ?? '',
-        district: district ?? existingAddress.district ?? '',
-        postalCode: postalCode ?? existingAddress.postalCode ?? ''
-    };
-
-    // Update GeoJSON Coordinates
-    if (latitude !== undefined && longitude !== undefined) {
-        const lat = parseFloat(latitude);
-        const lng = parseFloat(longitude);
-        
-        if (!isNaN(lat) && !isNaN(lng)) {
-            provider.location.type = 'Point';
-            provider.location.coordinates = [lng, lat]; // [Long, Lat]
-        }
-    }
-
-    // Update Jam Kerja
-    if (workingHours) {
-        provider.workingHours = {
-            start: workingHours.start || provider.workingHours?.start,
-            end: workingHours.end || provider.workingHours?.end
-        };
-    }
-
-    await provider.save();
+    const provider = await ProviderService.updateProviderProfile(req.user.userId, req.body);
 
     res.json({
       messageKey: 'providers.profile.updated',
@@ -560,44 +143,22 @@ async function updateProviderProfile(req, res, next) {
       data: provider
     });
   } catch (error) {
+    if (error.message === 'Profil mitra tidak ditemukan') return res.status(404).json({ message: error.message });
     next(error);
   }
 }
 
 async function verifyProvider(req, res, next) {
   try {
-    const { id } = req.params;
-    const { status, rejectionReason } = req.body;
-
-    if (!['verified', 'rejected'].includes(status)) {
-      return res.status(400).json({ message: 'Status harus verified atau rejected' });
-    }
-
-    const provider = await Provider.findById(id);
-    if (!provider) return res.status(404).json({ message: 'Mitra tidak ditemukan' });
-
-    provider.verificationStatus = status;
-    
-    if (status === 'rejected') {
-      provider.rejectionReason = rejectionReason || 'Dokumen tidak sesuai';
-    } else {
-      provider.rejectionReason = '';
-    }
-
-    await provider.save();
-
-    if (status === 'verified') {
-      await User.findByIdAndUpdate(provider.userId, {
-        $addToSet: { roles: 'provider' },
-        activeRole: 'provider' 
-      });
-    }
+    const provider = await ProviderService.verifyProvider(req.params.id, req.body.status, req.body.rejectionReason);
 
     res.json({
-      message: `Status mitra berhasil diubah menjadi ${status}`,
+      message: `Status mitra berhasil diubah menjadi ${req.body.status}`,
       data: provider
     });
   } catch (error) {
+    if (error.message.includes('Status harus')) return res.status(400).json({ message: error.message });
+    if (error.message === 'Mitra tidak ditemukan') return res.status(404).json({ message: error.message });
     next(error);
   }
 }
