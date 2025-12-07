@@ -15,7 +15,6 @@ const { getIO } = require('../chat/socket');
 const DEFAULT_TIMEZONE = 'Asia/Jakarta';
 const DEFAULT_OFFSET = '+07:00';
 const BROADCAST_RADIUS_KM = 15;
-const CRON_BATCH_SIZE = 50; // Memproses 50 order per batch untuk hemat memori
 
 // [OPTIMIZATION] Cache formatter di luar class untuk performa (Singleton pattern)
 const dateFormatterCache = new Map();
@@ -46,7 +45,7 @@ function getCachedFormatter(timeZone) {
 }
 
 class OrderService {
-  // --- HELPER METHODS ---
+  // --- HELPER METHODS (UTILITY) ---
 
   getLocalDateComponents(dateInput, timeZone = DEFAULT_TIMEZONE) {
     if (!dateInput) return null;
@@ -73,6 +72,493 @@ class OrderService {
       providerId: providerId,
       status: { $in: activeStatuses }
     });
+  }
+
+  // --- PRIVATE HELPERS FOR CREATE ORDER (REFACTORING STEP) ---
+
+  /**
+   * Mengambil dan memvalidasi data provider untuk Direct Order
+   */
+  async _fetchAndValidateProvider(providerId, orderType, session) {
+    if (orderType !== 'direct') return null;
+    if (!providerId) throw new Error('Provider ID wajib untuk Direct Order');
+
+    const providerData = await Provider.findById(providerId)
+      .populate('userId', 'fullName profilePictureUrl phoneNumber')
+      .session(session)
+      .lean();
+
+    if (!providerData) throw new Error('Mitra tidak ditemukan atau tidak aktif.');
+    if (providerData.verificationStatus !== 'verified') throw new Error('Mitra ini belum terverifikasi.');
+
+    return providerData;
+  }
+
+  /**
+   * Memproses items, validasi layanan, dan hitung subtotal
+   */
+  async _processOrderItems(items, orderType, providerData, session) {
+    if (!items || items.length === 0) throw new Error('Items tidak boleh kosong');
+
+    const serviceIds = items.map(item => item.serviceId).filter(Boolean);
+    const foundServices = await Service.find({ _id: { $in: serviceIds } }).session(session);
+    const serviceMap = new Map(foundServices.map(s => [s._id.toString(), s]));
+
+    let servicesSubtotal = 0;
+    const validatedItems = [];
+
+    for (const item of items) {
+      if (!item.serviceId) continue;
+      const serviceDoc = serviceMap.get(item.serviceId.toString());
+      if (!serviceDoc) throw new Error(`Service ID ${item.serviceId} tidak ditemukan.`);
+
+      const quantity = parseInt(item.quantity) || 1;
+      if (quantity <= 0) throw new Error(`Quantity untuk layanan ${serviceDoc.name} harus positif.`);
+      
+      let realPrice;
+
+      if (orderType === 'direct' && providerData) {
+        const providerService = providerData.services.find(
+          ps => ps.serviceId && ps.serviceId.toString() === item.serviceId.toString()
+        );
+        if (!providerService || !providerService.isActive) {
+          throw new Error(`Mitra ini tidak menyediakan layanan "${serviceDoc.name}" atau layanan sedang tidak aktif.`);
+        }
+        realPrice = providerService.price;
+      } else {
+        realPrice = serviceDoc.price || serviceDoc.basePrice;
+      }
+
+      servicesSubtotal += (realPrice * quantity);
+      validatedItems.push({
+        serviceId: serviceDoc._id,
+        name: serviceDoc.name,
+        price: realPrice,
+        quantity: quantity,
+        note: item.note || ''
+      });
+    }
+
+    return { validatedItems, servicesSubtotal };
+  }
+
+  /**
+   * Validasi dan apply voucher logic
+   */
+  async _applyVoucher(voucherCode, userId, items, session) {
+    if (!voucherCode) return { discountAmount: 0, voucherId: null, lockedUserVoucher: null };
+
+    const masterVoucher = await Voucher.findOne({ code: voucherCode.toUpperCase() }).session(session);
+    if (!masterVoucher) throw new Error('Kode voucher tidak valid.');
+
+    const userVoucher = await UserVoucher.findOne({
+      userId,
+      voucherId: masterVoucher._id,
+      status: 'active'
+    }).populate('voucherId').session(session);
+
+    if (!userVoucher) throw new Error('Voucher tidak valid atau belum diklaim.');
+
+    const voucher = userVoucher.voucherId;
+    const now = new Date();
+    if (!voucher.isActive || new Date(voucher.expiryDate) < now) throw new Error('Voucher sudah kadaluarsa');
+
+    let eligibleForDiscountTotal = 0;
+    const applicableServiceIds = voucher.applicableServices.map(id => id.toString());
+    const isGlobalVoucher = applicableServiceIds.length === 0;
+
+    items.forEach(item => {
+      const itemTotal = item.price * item.quantity;
+      if (isGlobalVoucher || applicableServiceIds.includes(item.serviceId.toString())) {
+        eligibleForDiscountTotal += itemTotal;
+      }
+    });
+
+    if (eligibleForDiscountTotal === 0) throw new Error('Voucher ini tidak berlaku untuk layanan yang Anda pilih.');
+    if (eligibleForDiscountTotal < voucher.minPurchase) throw new Error(`Minimal pembelian layanan valid adalah Rp ${voucher.minPurchase.toLocaleString()}`);
+
+    let discountAmount = 0;
+    if (voucher.discountType === 'percentage') {
+      discountAmount = (eligibleForDiscountTotal * voucher.discountValue) / 100;
+      if (voucher.maxDiscount > 0 && discountAmount > voucher.maxDiscount) discountAmount = voucher.maxDiscount;
+    } else {
+      discountAmount = voucher.discountValue;
+    }
+
+    if (discountAmount > eligibleForDiscountTotal) discountAmount = eligibleForDiscountTotal;
+
+    const lockedUserVoucher = await UserVoucher.findOneAndUpdate(
+      { _id: userVoucher._id, status: 'active' },
+      { status: 'used', usageDate: new Date() },
+      { new: true, session: session }
+    );
+    if (!lockedUserVoucher) throw new Error('Voucher gagal digunakan.');
+
+    return { discountAmount, voucherId: voucher._id, lockedUserVoucher };
+  }
+
+  /**
+   * Validasi jadwal kunjungan (khusus Direct Order)
+   */
+  async _validateSchedule(scheduledAt, providerData, providerId, session) {
+    if (!providerData) return; // Basic order does not validate specific provider schedule yet
+
+    const targetTimeZone = providerData.timeZone || DEFAULT_TIMEZONE;
+    const targetOffset = providerData.timeZoneOffset || DEFAULT_OFFSET;
+    const scheduled = this.getLocalDateComponents(scheduledAt, targetTimeZone);
+    
+    if (!scheduled) throw new Error('Format tanggal kunjungan tidak valid.');
+    
+    const now = new Date();
+    const oneHourBefore = new Date(now.getTime() - 60 * 60 * 1000);
+    if (scheduled.fullDate < oneHourBefore) throw new Error('Tanggal kunjungan tidak boleh di masa lalu.');
+
+    if (providerData.blockedDates && providerData.blockedDates.length > 0) {
+      const isBlocked = providerData.blockedDates.some(blockedDate => {
+        const blocked = this.getLocalDateComponents(blockedDate, targetTimeZone);
+        return blocked && blocked.dateOnly === scheduled.dateOnly;
+      });
+      if (isBlocked) throw new Error('Tanggal kunjungan ini diblokir manual oleh Mitra (Libur).');
+    }
+
+    const dateStart = new Date(`${scheduled.dateOnly}T00:00:00.000${targetOffset}`);
+    const dateEnd = new Date(`${scheduled.dateOnly}T23:59:59.999${targetOffset}`);
+
+    const existingOrder = await Order.findOne({
+      providerId: providerId,
+      status: { $in: ['paid', 'accepted', 'on_the_way', 'working', 'waiting_approval'] },
+      scheduledAt: { $gte: dateStart, $lte: dateEnd }
+    }).session(session);
+
+    if (existingOrder) throw new Error('Mitra sudah penuh pada tanggal tersebut.');
+  }
+
+  // --- CORE BUSINESS LOGIC METHODS ---
+
+  async createOrder(user, body) {
+    const session = await mongoose.startSession();
+    
+    // Variabel state untuk side effects
+    let createdOrder = null;
+    let providerUserIdToNotify = null;
+    let shouldBroadcastBasic = false;
+
+    try {
+      session.startTransaction();
+
+      const userId = user?.userId;
+      if (!userId) throw new Error('Unauthorized');
+
+      const {
+        providerId, items = [], orderType, scheduledAt, shippingAddress,
+        location, customerContact, orderNote, propertyDetails,
+        scheduledTimeSlot, attachments, voucherCode
+      } = body;
+
+      // 1. Fetch Provider Data (If Direct)
+      const providerData = await this._fetchAndValidateProvider(providerId, orderType, session);
+      
+      // 2. Validate & Calculate Items
+      const { validatedItems, servicesSubtotal } = await this._processOrderItems(items, orderType, providerData, session);
+
+      // 3. Fetch Settings (Admin Fee & Commission)
+      const settings = await Settings.findOne({ key: 'global_config' }).session(session);
+      const adminFee = settings ? settings.adminFee : 2500;
+      const platformCommissionPercent = settings ? settings.platformCommissionPercent : 12;
+
+      // 4. Validate & Apply Voucher
+      const { discountAmount, voucherId, lockedUserVoucher } = await this._applyVoucher(voucherCode, userId, validatedItems, session);
+
+      // 5. Final Calculation
+      const finalTotalAmount = servicesSubtotal + adminFee - discountAmount;
+
+      // 6. Validate Schedule (If Direct)
+      if (orderType === 'direct') {
+         await this._validateSchedule(scheduledAt, providerData, providerId, session);
+      }
+
+      // 7. Prepare Snapshot
+      let providerSnapshot = {};
+      if (providerData && providerData.userId) {
+        providerUserIdToNotify = providerData.userId._id;
+        providerSnapshot = {
+          fullName: providerData.userId.fullName,
+          profilePictureUrl: providerData.userId.profilePictureUrl,
+          phoneNumber: providerData.userId.phoneNumber,
+          rating: providerData.rating || 0
+        };
+      }
+
+      // 8. Create Order Document
+      const order = new Order({
+        userId,
+        providerId: orderType === 'direct' ? providerId : null,
+        providerSnapshot,
+        items: validatedItems,
+        totalAmount: Math.floor(finalTotalAmount),
+        adminFee,
+        appliedCommissionPercent: platformCommissionPercent, // [SNAPSHOT] Important for Step 1 Logic
+        discountAmount: Math.floor(discountAmount),
+        voucherId,
+        orderType,
+        scheduledAt,
+        shippingAddress,
+        location,
+        customerContact,
+        orderNote: orderNote || '',
+        propertyDetails: propertyDetails || {},
+        scheduledTimeSlot: scheduledTimeSlot || {},
+        attachments: attachments || []
+      });
+
+      await order.save({ session });
+
+      if (lockedUserVoucher) {
+        await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { orderId: order._id }, { session });
+      }
+
+      await session.commitTransaction();
+      
+      createdOrder = order;
+      shouldBroadcastBasic = orderType === 'basic';
+
+    } catch (error) {
+      if (session.inTransaction()) {
+        await session.abortTransaction();
+      }
+      throw error;
+    } finally {
+      session.endSession();
+    }
+
+    // --- SIDE EFFECTS (NOTIFICATIONS) ---
+    this._handleOrderNotifications(createdOrder, providerUserIdToNotify, shouldBroadcastBasic);
+
+    return createdOrder;
+  }
+
+  // Helper untuk Notification (Side Effect)
+  async _handleOrderNotifications(order, providerUserId, shouldBroadcast) {
+    if (!order) return;
+    try {
+      const io = getIO();
+      if (!io) return;
+
+      if (order.orderType === 'direct' && providerUserId) {
+        io.to(providerUserId.toString()).emit('order_new', {
+          message: 'Anda menerima pesanan baru!',
+          order: order.toObject()
+        });
+      }
+
+      if (shouldBroadcast) {
+        await this.broadcastBasicOrderToNearbyProviders(order);
+      }
+    } catch (error) {
+      console.error('[NOTIFICATION ERROR]', error);
+    }
+  }
+
+  async listOrders(user, query) {
+    const { roles = [], userId } = user || {};
+    const { view, page = 1, limit = 10 } = query;
+
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.max(1, parseInt(limit));
+    const skip = (pageNum - 1) * limitNum;
+
+    let match = { userId: new mongoose.Types.ObjectId(userId) };
+
+    if (view === 'provider' && roles.includes('provider')) {
+      const provider = await Provider.findOne({ userId }).lean();
+      if (provider) {
+        match = { providerId: new mongoose.Types.ObjectId(provider._id) };
+      } else {
+        return { data: [], meta: { total: 0, page: pageNum, limit: limitNum } };
+      }
+    }
+
+    if (roles.includes('admin') && !view) {
+      match = {};
+    }
+
+    const totalDocs = await Order.countDocuments(match);
+
+    const pipeline = [
+      { $match: match },
+      { $sort: { createdAt: -1 } },
+      { $skip: skip },
+      { $limit: limitNum },
+
+      // Lookup Customer
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'userId',
+          foreignField: '_id',
+          as: 'customerInfo',
+        },
+      },
+      { $unwind: { path: '$customerInfo', preserveNullAndEmptyArrays: true } },
+
+      // Lookup Voucher
+      {
+        $lookup: {
+          from: 'vouchers',
+          localField: 'voucherId',
+          foreignField: '_id',
+          as: 'voucherInfo',
+        },
+      },
+      { $unwind: { path: '$voucherInfo', preserveNullAndEmptyArrays: true } },
+      
+      // Lookup Provider
+      {
+        $lookup: {
+          from: 'providers',
+          localField: 'providerId',
+          foreignField: '_id',
+          as: 'providerDoc',
+        },
+      },
+      { $unwind: { path: '$providerDoc', preserveNullAndEmptyArrays: true } },
+
+      // Nested Lookup Provider User
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'providerDoc.userId',
+          foreignField: '_id',
+          as: 'providerUserInfo',
+        },
+      },
+      { $unwind: { path: '$providerUserInfo', preserveNullAndEmptyArrays: true } },
+      
+      // Lookup Services
+      {
+        $lookup: {
+          from: 'services',
+          localField: 'items.serviceId',
+          foreignField: '_id',
+          as: 'serviceDetails',
+        },
+      },
+
+      // Reconstruct items
+      {
+        $addFields: {
+          items: {
+            $map: {
+              input: '$items',
+              as: 'item',
+              in: {
+                $mergeObjects: [
+                  '$$item',
+                  {
+                    serviceId: {
+                      $arrayElemAt: [
+                        {
+                          $filter: {
+                            input: '$serviceDetails',
+                            as: 'service',
+                            cond: { $eq: ['$$service._id', '$$item.serviceId'] },
+                          },
+                        },
+                        0,
+                      ],
+                    },
+                  },
+                ]
+              }
+            }
+          }
+        }
+      },
+      
+      // Project
+      {
+        $project: {
+          _id: 1,
+          orderNumber: 1,
+          totalAmount: 1,
+          status: 1,
+          createdAt: 1,
+          scheduledAt: 1,
+          orderType: 1,
+          adminFee: 1,
+          appliedCommissionPercent: 1, // [UPDATED FROM STEP 1] Expose snapshot fee
+          discountAmount: 1,
+          completionEvidence: 1,
+          additionalFees: 1,
+          items: {
+            $map: {
+              input: '$items',
+              as: 'item',
+              in: {
+                serviceId: {
+                  _id: '$$item.serviceId._id',
+                  name: '$$item.serviceId.name',
+                  category: '$$item.serviceId.category',
+                  iconUrl: '$$item.serviceId.iconUrl',
+                },
+                name: '$$item.name',
+                price: '$$item.price',
+                quantity: '$$item.quantity',
+                note: '$$item.note',
+              }
+            }
+          },
+          userId: {
+            _id: '$customerInfo._id',
+            fullName: '$customerInfo.fullName',
+            phoneNumber: '$customerInfo.phoneNumber',
+          },
+          voucherId: {
+            _id: '$voucherInfo._id',
+            code: '$voucherInfo.code',
+            discountType: '$voucherInfo.discountType',
+            discountValue: '$voucherInfo.discountValue',
+          },
+          providerId: {
+            _id: '$providerDoc._id',
+            rating: '$providerDoc.rating',
+            userId: {
+              _id: '$providerUserInfo._id',
+              fullName: '$providerUserInfo.fullName',
+              profilePictureUrl: '$providerUserInfo.profilePictureUrl',
+            },
+          }
+        }
+      }
+    ];
+
+    const data = await Order.aggregate(pipeline);
+
+    return {
+      data,
+      meta: {
+        total: totalDocs,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalDocs / limitNum)
+      }
+    };
+  }
+
+  async getOrderById(orderId) {
+    const order = await Order.findById(orderId)
+      .populate('items.serviceId', 'name iconUrl')
+      .populate('voucherId', 'code description')
+      .populate({
+        path: 'providerId',
+        select: 'userId rating',
+        populate: { path: 'userId', select: 'fullName phoneNumber profilePictureUrl' }
+      })
+      .populate('userId', 'fullName phoneNumber profilePictureUrl')
+      .lean();
+
+    if (!order) throw new Error('Pesanan tidak ditemukan');
+    return order;
   }
 
   async broadcastBasicOrderToNearbyProviders(order) {
@@ -209,7 +695,7 @@ class OrderService {
 
       return {
         success: true,
-        order, // Kembalikan objek order terbaru agar controller tidak perlu fetch lagi
+        order,
         earnings: {
           totalAmount: order.totalAmount,
           earningsAmount: Math.round(earningsAmount)
@@ -225,472 +711,12 @@ class OrderService {
     }
   }
 
-  // --- CORE BUSINESS LOGIC METHODS ---
-
-  async listOrders(user, query) {
-    const { roles = [], userId } = user || {};
-    const { view, page = 1, limit = 10 } = query;
-
-    // [PERFORMANCE FIX] Hitung Pagination Variables
-    const pageNum = Math.max(1, parseInt(page));
-    const limitNum = Math.max(1, parseInt(limit));
-    const skip = (pageNum - 1) * limitNum;
-
-    let match = { userId: new mongoose.Types.ObjectId(userId) };
-
-    if (view === 'provider' && roles.includes('provider')) {
-      // Find provider ID first, this is necessary.
-      const provider = await Provider.findOne({ userId }).lean();
-      if (provider) {
-        match = { providerId: new mongoose.Types.ObjectId(provider._id) };
-      } else {
-        return { data: [], meta: { total: 0, page: pageNum, limit: limitNum } };
-      }
-    }
-
-    if (roles.includes('admin') && !view) {
-      match = {};
-    }
-
-    // [PERFORMANCE FIX] Hitung Total Dokumen untuk Metadata (Opsional: Bisa dihapus jika terlalu berat)
-    const totalDocs = await Order.countDocuments(match);
-
-    const pipeline = [
-      { $match: match },
-      { $sort: { createdAt: -1 } },
-      
-      // [PERFORMANCE FIX] Skip & Limit SEBELUM Lookup
-      { $skip: skip },
-      { $limit: limitNum },
-
-      // Lookup for Customer Info
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'userId',
-          foreignField: '_id',
-          as: 'customerInfo',
-        },
-      },
-      { $unwind: { path: '$customerInfo', preserveNullAndEmptyArrays: true } },
-
-      // Lookup for Voucher Info
-      {
-        $lookup: {
-          from: 'vouchers',
-          localField: 'voucherId',
-          foreignField: '_id',
-          as: 'voucherInfo',
-        },
-      },
-      { $unwind: { path: '$voucherInfo', preserveNullAndEmptyArrays: true } },
-      
-      // Lookup for Provider Info
-      {
-        $lookup: {
-          from: 'providers',
-          localField: 'providerId',
-          foreignField: '_id',
-          as: 'providerDoc',
-        },
-      },
-      { $unwind: { path: '$providerDoc', preserveNullAndEmptyArrays: true } },
-
-      // Nested Lookup for Provider User Info
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'providerDoc.userId',
-          foreignField: '_id',
-          as: 'providerUserInfo',
-        },
-      },
-      { $unwind: { path: '$providerUserInfo', preserveNullAndEmptyArrays: true } },
-      
-      // Lookup for Service Details (nested inside items array)
-      {
-        $lookup: {
-          from: 'services',
-          localField: 'items.serviceId',
-          foreignField: '_id',
-          as: 'serviceDetails',
-        },
-      },
-
-      // Reconstruct the `items` array with populated service data
-      {
-        $addFields: {
-          items: {
-            $map: {
-              input: '$items',
-              as: 'item',
-              in: {
-                $mergeObjects: [
-                  '$$item',
-                  {
-                    serviceId: {
-                      $arrayElemAt: [
-                        {
-                          $filter: {
-                            input: '$serviceDetails',
-                            as: 'service',
-                            cond: { $eq: ['$$service._id', '$$item.serviceId'] },
-                          },
-                        },
-                        0,
-                      ],
-                    },
-                  },
-                ]
-              }
-            }
-          }
-        }
-      },
-      
-      // Project the final structure (mimicking original populate structure)
-      {
-        $project: {
-          // Fields from Order
-          _id: 1,
-          orderNumber: 1,
-          totalAmount: 1,
-          status: 1,
-          createdAt: 1,
-          scheduledAt: 1,
-          orderType: 1,
-          adminFee: 1,
-          discountAmount: 1,
-          completionEvidence: 1,
-          additionalFees: 1,
-          // Items
-          items: {
-            $map: {
-              input: '$items',
-              as: 'item',
-              in: {
-                serviceId: {
-                  _id: '$$item.serviceId._id',
-                  name: '$$item.serviceId.name',
-                  category: '$$item.serviceId.category',
-                  iconUrl: '$$item.serviceId.iconUrl',
-                },
-                name: '$$item.name',
-                price: '$$item.price',
-                quantity: '$$item.quantity',
-                note: '$$item.note',
-              }
-            }
-          },
-          // User (Customer) Info
-          userId: {
-            _id: '$customerInfo._id',
-            fullName: '$customerInfo.fullName',
-            phoneNumber: '$customerInfo.phoneNumber',
-          },
-          // Voucher Info
-          voucherId: {
-            _id: '$voucherInfo._id',
-            code: '$voucherInfo.code',
-            discountType: '$voucherInfo.discountType',
-            discountValue: '$voucherInfo.discountValue',
-          },
-          // Provider Info
-          providerId: {
-            _id: '$providerDoc._id',
-            rating: '$providerDoc.rating',
-            userId: {
-              _id: '$providerUserInfo._id',
-              fullName: '$providerUserInfo.fullName',
-              profilePictureUrl: '$providerUserInfo.profilePictureUrl',
-            },
-          }
-        }
-      }
-    ];
-
-    const data = await Order.aggregate(pipeline);
-
-    // [PERFORMANCE FIX] Mengembalikan struktur dengan Metadata
-    return {
-      data,
-      meta: {
-        total: totalDocs,
-        page: pageNum,
-        limit: limitNum,
-        totalPages: Math.ceil(totalDocs / limitNum)
-      }
-    };
-  }
-
-  async createOrder(user, body) {
-    const session = await mongoose.startSession();
-    
-    // Variabel untuk menyimpan hasil operasi DB agar bisa diakses di luar blok try-catch DB
-    let createdOrder = null;
-    let providerUserIdToNotify = null;
-    let shouldBroadcastBasic = false;
-
-    try {
-      session.startTransaction();
-
-      const userId = user?.userId;
-      if (!userId) throw new Error('Unauthorized');
-
-      const {
-        providerId, items = [], orderType, scheduledAt, shippingAddress,
-        location, customerContact, orderNote, propertyDetails,
-        scheduledTimeSlot, attachments, voucherCode
-      } = body;
-
-      if (items.length === 0) throw new Error('Items tidak boleh kosong');
-
-      let providerData = null;
-      let providerSnapshot = {};
-
-      if (orderType === 'direct') {
-        if (!providerId) throw new Error('Provider ID wajib untuk Direct Order');
-
-        providerData = await Provider.findById(providerId)
-          .populate('userId', 'fullName profilePictureUrl phoneNumber')
-          .session(session)
-          .lean();
-
-        if (!providerData) throw new Error('Mitra tidak ditemukan atau tidak aktif.');
-        if (providerData.verificationStatus !== 'verified') throw new Error('Mitra ini belum terverifikasi.');
-
-        if (providerData.userId) {
-          providerUserIdToNotify = providerData.userId._id;
-          providerSnapshot = {
-            fullName: providerData.userId.fullName,
-            profilePictureUrl: providerData.userId.profilePictureUrl,
-            phoneNumber: providerData.userId.phoneNumber,
-            rating: providerData.rating || 0
-          };
-        }
-      }
-
-      const serviceIds = items.map(item => item.serviceId).filter(Boolean);
-      const foundServices = await Service.find({ _id: { $in: serviceIds } }).session(session);
-      const serviceMap = new Map(foundServices.map(s => [s._id.toString(), s]));
-
-      let servicesSubtotal = 0;
-      const validatedItems = [];
-
-      for (const item of items) {
-        if (!item.serviceId) continue;
-        const serviceDoc = serviceMap.get(item.serviceId.toString());
-        if (!serviceDoc) throw new Error(`Service ID ${item.serviceId} tidak ditemukan.`);
-
-        const quantity = parseInt(item.quantity) || 1;
-        // [LOGICAL ROBUSTNESS FIX] Validasi Quantity
-        if (quantity <= 0) throw new Error(`Quantity untuk layanan ${serviceDoc.name} harus positif.`);
-        
-        let realPrice;
-
-        if (orderType === 'direct' && providerData) {
-          const providerService = providerData.services.find(
-            ps => ps.serviceId && ps.serviceId.toString() === item.serviceId.toString()
-          );
-          if (!providerService || !providerService.isActive) {
-            throw new Error(`Mitra ini tidak menyediakan layanan "${serviceDoc.name}" atau layanan sedang tidak aktif.`);
-          }
-          realPrice = providerService.price;
-        } else {
-          realPrice = serviceDoc.price || serviceDoc.basePrice;
-        }
-
-        servicesSubtotal += (realPrice * quantity);
-        validatedItems.push({
-          serviceId: serviceDoc._id,
-          name: serviceDoc.name,
-          price: realPrice,
-          quantity: quantity,
-          note: item.note || ''
-        });
-      }
-
-      const settings = await Settings.findOne({ key: 'global_config' }).session(session);
-      const adminFee = settings ? settings.adminFee : 2500;
-      const platformCommissionPercent = settings ? settings.platformCommissionPercent : 12;
-
-      let discountAmount = 0;
-      let voucherId = null;
-      let lockedUserVoucher = null;
-
-      if (voucherCode) {
-        const masterVoucher = await Voucher.findOne({ code: voucherCode.toUpperCase() }).session(session);
-        if (!masterVoucher) throw new Error('Kode voucher tidak valid.');
-
-        const userVoucher = await UserVoucher.findOne({
-          userId,
-          voucherId: masterVoucher._id,
-          status: 'active'
-        }).populate('voucherId').session(session);
-
-        if (!userVoucher) throw new Error('Voucher tidak valid atau belum diklaim.');
-
-        const voucher = userVoucher.voucherId;
-        const now = new Date();
-        if (!voucher.isActive || new Date(voucher.expiryDate) < now) throw new Error('Voucher sudah kadaluarsa');
-
-        let eligibleForDiscountTotal = 0;
-        const applicableServiceIds = voucher.applicableServices.map(id => id.toString());
-        const isGlobalVoucher = applicableServiceIds.length === 0;
-
-        validatedItems.forEach(item => {
-          const itemTotal = item.price * item.quantity;
-          if (isGlobalVoucher || applicableServiceIds.includes(item.serviceId.toString())) {
-            eligibleForDiscountTotal += itemTotal;
-          }
-        });
-
-        if (eligibleForDiscountTotal === 0) throw new Error('Voucher ini tidak berlaku untuk layanan yang Anda pilih.');
-        if (eligibleForDiscountTotal < voucher.minPurchase) throw new Error(`Minimal pembelian layanan valid adalah Rp ${voucher.minPurchase.toLocaleString()}`);
-
-        if (voucher.discountType === 'percentage') {
-          discountAmount = (eligibleForDiscountTotal * voucher.discountValue) / 100;
-          if (voucher.maxDiscount > 0 && discountAmount > voucher.maxDiscount) discountAmount = voucher.maxDiscount;
-        } else {
-          discountAmount = voucher.discountValue;
-        }
-
-        if (discountAmount > eligibleForDiscountTotal) discountAmount = eligibleForDiscountTotal;
-        voucherId = voucher._id;
-
-        lockedUserVoucher = await UserVoucher.findOneAndUpdate(
-          { _id: userVoucher._id, status: 'active' },
-          { status: 'used', usageDate: new Date() },
-          { new: true, session: session }
-        );
-        if (!lockedUserVoucher) throw new Error('Voucher gagal digunakan.');
-      }
-
-      const finalTotalAmount = servicesSubtotal + adminFee - discountAmount;
-
-      if (orderType === 'direct' && providerData) {
-        const targetTimeZone = providerData.timeZone || DEFAULT_TIMEZONE;
-        const targetOffset = providerData.timeZoneOffset || DEFAULT_OFFSET;
-        const scheduled = this.getLocalDateComponents(scheduledAt, targetTimeZone);
-        
-        if (!scheduled) throw new Error('Format tanggal kunjungan tidak valid.');
-        
-        const now = new Date();
-        const oneHourBefore = new Date(now.getTime() - 60 * 60 * 1000);
-        if (scheduled.fullDate < oneHourBefore) throw new Error('Tanggal kunjungan tidak boleh di masa lalu.');
-
-        if (providerData.blockedDates && providerData.blockedDates.length > 0) {
-          const isBlocked = providerData.blockedDates.some(blockedDate => {
-            const blocked = this.getLocalDateComponents(blockedDate, targetTimeZone);
-            return blocked && blocked.dateOnly === scheduled.dateOnly;
-          });
-          if (isBlocked) throw new Error('Tanggal kunjungan ini diblokir manual oleh Mitra (Libur).');
-        }
-
-        const dateStart = new Date(`${scheduled.dateOnly}T00:00:00.000${targetOffset}`);
-        const dateEnd = new Date(`${scheduled.dateOnly}T23:59:59.999${targetOffset}`);
-
-        const existingOrder = await Order.findOne({
-          providerId: providerId,
-          status: { $in: ['paid', 'accepted', 'on_the_way', 'working', 'waiting_approval'] },
-          scheduledAt: { $gte: dateStart, $lte: dateEnd }
-        }).session(session);
-
-        if (existingOrder) throw new Error('Mitra sudah penuh pada tanggal tersebut.');
-      }
-
-      const order = new Order({
-        userId,
-        providerId: orderType === 'direct' ? providerId : null,
-        providerSnapshot,
-        items: validatedItems,
-        totalAmount: Math.floor(finalTotalAmount),
-        adminFee,
-        appliedCommissionPercent: platformCommissionPercent,
-        discountAmount: Math.floor(discountAmount),
-        voucherId,
-        orderType,
-        scheduledAt,
-        shippingAddress,
-        location,
-        customerContact,
-        orderNote: orderNote || '',
-        propertyDetails: propertyDetails || {},
-        scheduledTimeSlot: scheduledTimeSlot || {},
-        attachments: attachments || []
-      });
-
-      await order.save({ session });
-
-      if (lockedUserVoucher) {
-        await UserVoucher.findByIdAndUpdate(lockedUserVoucher._id, { orderId: order._id }, { session });
-      }
-
-      // [ARCHITECTURAL ROBUSTNESS] Commit transaction SEBELUM side effect (socket/broadcast)
-      // Pastikan data order tersimpan ke DB sebelum mengirim notifikasi.
-      await session.commitTransaction();
-      
-      createdOrder = order;
-      shouldBroadcastBasic = orderType === 'basic';
-
-    } catch (error) {
-      if (session.inTransaction()) {
-        await session.abortTransaction();
-      }
-      throw error;
-    } finally {
-      session.endSession();
-    }
-
-    // --- SOCKET & BROADCAST Logic (DECOUPLED Side Effect - Di luar Transaction) ---
-    // [ARCHITECTURAL FLAWS] Logic notifikasi harusnya di NotificationService, bukan OrderService.
-    // Error di sini tidak akan membatalkan order yang sudah tersimpan
-    try {
-      const io = getIO();
-      if (createdOrder && io) {
-        if (createdOrder.orderType === 'direct' && providerUserIdToNotify) {
-          io.to(providerUserIdToNotify.toString()).emit('order_new', {
-            message: 'Anda menerima pesanan baru!',
-            order: createdOrder.toObject()
-          });
-        }
-      }
-
-      if (createdOrder && shouldBroadcastBasic) {
-        // [PERFORMANCE] Gunakan await agar async context terjaga, tapi error ditangkap lokal
-        await this.broadcastBasicOrderToNearbyProviders(createdOrder);
-      }
-    } catch (broadcastError) {
-      console.error('[ORDER POST-PROCESS ERROR] Notification failed, consider using FCM/Email fallback:', broadcastError);
-      // Jangan throw error ke controller agar response tetap 201 Created
-    }
-
-    return createdOrder;
-  }
-
-  async getOrderById(orderId) {
-    const order = await Order.findById(orderId)
-      .populate('items.serviceId', 'name iconUrl')
-      .populate('voucherId', 'code description')
-      .populate({
-        path: 'providerId',
-        select: 'userId rating',
-        populate: { path: 'userId', select: 'fullName phoneNumber profilePictureUrl' }
-      })
-      .populate('userId', 'fullName phoneNumber profilePictureUrl')
-      .lean();
-
-    if (!order) throw new Error('Pesanan tidak ditemukan');
-    return order;
-  }
-
   async listIncomingOrders(user) {
     const provider = await Provider.findOne({ userId: user.userId }).lean();
     if (!provider) throw new Error('Anda belum terdaftar sebagai Mitra.');
 
     const activeOrderCount = await this.getProviderActiveOrderCount(provider._id);
 
-    // [QUERY 1] Direct Orders (Prioritas)
     const directOrdersPromise = Order.find({
       providerId: provider._id,
       status: 'paid'
@@ -699,7 +725,6 @@ class OrderService {
       .populate('items.serviceId', 'name category iconUrl')
       .lean();
 
-    // [QUERY 2] Basic Orders (Hanya jika tidak sibuk & terverifikasi)
     let basicOrdersPromise = Promise.resolve([]);
 
     if (activeOrderCount === 0 && provider.verificationStatus === 'verified') {
@@ -714,7 +739,6 @@ class OrderService {
         'items.serviceId': { $in: myServiceIds }
       };
 
-      // [ROBUSTNESS] Validasi ketat untuk koordinat sebelum query spasial
       if (
         provider.location && 
         provider.location.type === 'Point' && 
@@ -737,9 +761,6 @@ class OrderService {
           .populate('items.serviceId', 'name category iconUrl')
           .limit(20)
           .lean();
-      } else {
-        // Fallback jika lokasi provider belum diset dengan benar
-        // console.warn(`Provider ${provider._id} has invalid location. Skipping proximity search.`);
       }
     }
 
@@ -805,7 +826,6 @@ class OrderService {
   }
 
   async updateOrderStatus(user, orderId, status) {
-    // Fetch awal untuk validasi
     const order = await Order.findById(orderId)
       .populate('userId')
       .populate({ path: 'providerId', populate: { path: 'userId' } });
@@ -844,12 +864,10 @@ class OrderService {
     if (status === 'completed' && isCustomer) {
       if (order.status !== 'waiting_approval') throw new Error('Belum ada permintaan penyelesaian.');
 
-      // [CRITICAL FIX] Menggunakan return value dari processOrderCompletion untuk menghindari fetch ulang
       const result = await this.processOrderCompletion(order._id);
       
       const io = getIO();
       if (io && result.order.providerId) {
-        // Karena result.order mungkin tidak populate provider, kita ambil ID dari order awal
         const providerUserId = order.providerId.userId._id.toString();
         io.to(providerUserId).emit('order_status_update', {
           orderId: result.order._id,
@@ -865,7 +883,7 @@ class OrderService {
       };
     }
 
-    // 3. Status Updates Lainnya (On The Way / Working)
+    // 3. Status Updates Lainnya
     if (['on_the_way', 'working'].includes(status)) {
       if (!isProvider) throw new Error('Hanya mitra yang bisa mengubah status ini.');
       
@@ -978,8 +996,6 @@ class OrderService {
 
     const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
     
-    // [MEMORY FIX] Menggunakan Cursor untuk streaming data
-    // Ini jauh lebih aman daripada mengambil semua data ke RAM
     const cursor = Order.find({
       status: 'waiting_approval',
       waitingApprovalAt: { $lt: twoDaysAgo },
@@ -992,15 +1008,11 @@ class OrderService {
     let failCount = 0;
     let processedCount = 0;
 
-    // Iterasi satu per satu menggunakan cursor
     for (let order = await cursor.next(); order != null; order = await cursor.next()) {
       try {
         processedCount++;
-        
-        // 1. Process Earnings
         await this.processOrderCompletion(order._id);
         
-        // 2. Add System Note
         await Order.findByIdAndUpdate(order._id, {
           $set: { orderNote: (order.orderNote || '') + '\n[SYSTEM] Auto-completed due to inactivity.' }
         });
