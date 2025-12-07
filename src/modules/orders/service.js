@@ -736,7 +736,8 @@ class OrderService {
         orderType: 'basic',
         status: 'searching',
         providerId: null,
-        'items.serviceId': { $in: myServiceIds }
+        'items.serviceId': { $in: myServiceIds },
+        rejectedByProviders: { $ne: provider._id } // [UPDATED] Exclude rejected orders
       };
 
       if (
@@ -823,6 +824,48 @@ class OrderService {
     }
 
     return updatedOrder;
+  }
+
+  // [BARU] REJECT ORDER
+  async rejectOrder(user, orderId) {
+    const provider = await Provider.findOne({ userId: user.userId });
+    if (!provider) throw new Error('Provider not found');
+
+    const order = await Order.findById(orderId);
+    if (!order) throw new Error('Order not found');
+
+    if (order.orderType === 'direct') {
+       // Direct order rejection = Cancellation
+       // Pastikan yang reject adalah provider yang dituju
+       if (order.providerId && order.providerId.toString() === provider._id.toString()) {
+           if (order.status !== 'paid') throw new Error('Status order tidak valid untuk ditolak.');
+           
+           order.status = 'cancelled';
+           // Note: Refund logic should be handled here in production
+           await order.save();
+           
+           const io = getIO();
+           if (io) {
+               io.to(order.userId.toString()).emit('order_status_update', {
+                   orderId: order._id,
+                   status: 'cancelled',
+                   message: 'Mitra membatalkan/menolak pesanan Anda.',
+                   order
+               });
+           }
+
+           return { message: 'Order rejected and cancelled', order };
+       }
+       throw new Error('Unauthorized or invalid direct order rejection.');
+    } else {
+       // Basic order rejection = Hide from list
+       if (order.status !== 'searching') throw new Error('Order is no longer available');
+       
+       await Order.findByIdAndUpdate(orderId, {
+           $addToSet: { rejectedByProviders: provider._id }
+       });
+       return { message: 'Order hidden from your list' };
+    }
   }
 
   async updateOrderStatus(user, orderId, status) {
@@ -951,6 +994,32 @@ class OrderService {
     if (order.status !== 'working') throw new Error('Hanya bisa diajukan saat status "working".');
 
     order.additionalFees.push({ description, amount, status: 'pending_approval' });
+    await order.save();
+    return order;
+  }
+
+  // [BARU] VOID ADDITIONAL FEE (PROVIDER CANCEL REQUEST)
+  async voidAdditionalFee(user, orderId, feeId) {
+    const provider = await Provider.findOne({ userId: user.userId });
+    if (!provider) throw new Error('Unauthorized provider');
+
+    const order = await Order.findById(orderId);
+    if (!order) throw new Error('Order not found');
+
+    // Ensure order belongs to provider
+    if (!order.providerId || order.providerId.toString() !== provider._id.toString()) {
+        throw new Error('Unauthorized order access');
+    }
+
+    const fee = order.additionalFees.id(feeId);
+    if (!fee) throw new Error('Fee item not found');
+
+    // Only allow voiding if pending
+    if (fee.status !== 'pending_approval') {
+        throw new Error('Hanya biaya dengan status "menunggu persetujuan" yang bisa dibatalkan.');
+    }
+
+    fee.status = 'voided';
     await order.save();
     return order;
   }

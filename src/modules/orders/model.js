@@ -34,7 +34,8 @@ const additionalFeeSchema = new mongoose.Schema({
   amount: { type: Number, required: true },
   status: {
     type: String,
-    enum: ['pending_approval', 'approved_unpaid', 'paid', 'rejected'],
+    // [UPDATE] Tambahkan 'voided' agar provider bisa membatalkan request
+    enum: ['pending_approval', 'approved_unpaid', 'paid', 'rejected', 'voided'],
     default: 'pending_approval'
   },
   paymentId: { type: String, default: null }

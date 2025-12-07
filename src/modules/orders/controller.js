@@ -104,6 +104,24 @@ async function requestAdditionalFee(req, res, next) {
   }
 }
 
+// [BARU] 7b. VOID ADDITIONAL FEE
+async function voidAdditionalFee(req, res, next) {
+  try {
+    const order = await OrderService.voidAdditionalFee(
+      req.user, 
+      req.params.orderId, 
+      req.params.feeId
+    );
+
+    res.json({ 
+      message: 'Pengajuan biaya tambahan dibatalkan.',
+      data: order
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 // 8. UPLOAD COMPLETION EVIDENCE
 async function uploadCompletionEvidence(req, res, next) {
   try {
@@ -152,6 +170,16 @@ async function autoCompleteStuckOrders(req, res, next) {
   }
 }
 
+// 11. REJECT ORDER
+async function rejectOrder(req, res, next) {
+  try {
+    const result = await OrderService.rejectOrder(req.user, req.params.orderId);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = { 
   listOrders, 
   createOrder, 
@@ -160,7 +188,9 @@ module.exports = {
   acceptOrder,
   updateOrderStatus,
   requestAdditionalFee, 
+  voidAdditionalFee, // Export baru
   uploadCompletionEvidence,
   rejectAdditionalFee,
-  autoCompleteStuckOrders
+  autoCompleteStuckOrders,
+  rejectOrder 
 };

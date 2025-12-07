@@ -1,6 +1,8 @@
 // src/modules/earnings/controller.js
 const Earnings = require('./model');
-const Provider = require('../providers/model'); // [BARU] Import Provider untuk validasi bank
+const PayoutRequest = require('./payoutRequestModel'); // [BARU]
+const Provider = require('../providers/model'); 
+const User = require('../../models/User'); // [BARU] Perlu User model untuk cek/potong saldo
 const mongoose = require('mongoose');
 
 // 1. LIST EARNINGS HISTORY (Provider)
@@ -46,7 +48,7 @@ async function getEarningsSummary(req, res, next) {
       { 
         $match: { 
           userId: new mongoose.Types.ObjectId(userId),
-          status: { $in: ['completed', 'paid_out'] } // [FIX] Ambil yang sudah cair juga
+          status: { $in: ['completed', 'paid_out'] } 
         } 
       },
       {
@@ -56,6 +58,8 @@ async function getEarningsSummary(req, res, next) {
           lifetimeEarnings: { $sum: '$earningsAmount' },
           
           // Saldo Aktif (Hanya Completed / Belum Cair)
+          // [REVISI LOGIKA] Saldo aktif sebaiknya diambil dari User.balance (single source of truth)
+          // Tapi untuk statistik earning, kita hitung yang statusnya 'completed' (belum paid_out)
           currentBalance: {
             $sum: {
               $cond: [{ $eq: ['$status', 'completed'] }, '$earningsAmount', 0]
@@ -83,6 +87,10 @@ async function getEarningsSummary(req, res, next) {
       completedOrders: 0
     };
 
+    // [BARU] Ambil saldo aktual dari User Model untuk akurasi
+    const userDoc = await User.findById(userId).select('balance');
+    const realBalance = userDoc ? userDoc.balance : 0;
+
     const averageEarningsPerOrder = result.completedOrders > 0 
       ? result.lifetimeEarnings / result.completedOrders 
       : 0;
@@ -91,6 +99,7 @@ async function getEarningsSummary(req, res, next) {
       message: 'Ringkasan penghasilan berhasil diambil',
       data: {
         ...result,
+        currentBalance: realBalance, // Override dengan saldo real
         averageEarningsPerOrder: Math.round(averageEarningsPerOrder)
       }
     });
@@ -218,10 +227,104 @@ async function processPayout(req, res, next) {
   }
 }
 
+// [BARU] 6. PROVIDER: Request Payout
+async function requestPayout(req, res, next) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const userId = req.user.userId;
+    const { amount } = req.body;
+
+    // 1. Cek Data Provider & Bank
+    const provider = await Provider.findOne({ userId }).session(session);
+    if (!provider) {
+        throw new Error('Data mitra tidak ditemukan');
+    }
+
+    if (!provider.bankAccount || !provider.bankAccount.accountNumber || !provider.bankAccount.bankName) {
+        throw new Error('Mohon lengkapi data Rekening Bank di menu Pengaturan Akun sebelum mencairkan dana.');
+    }
+
+    // 2. Cek Saldo User
+    const user = await User.findById(userId).session(session);
+    if (!user) throw new Error('User tidak ditemukan');
+
+    if (user.balance < amount) {
+        throw new Error(`Saldo tidak mencukupi. Saldo saat ini: Rp ${user.balance.toLocaleString()}`);
+    }
+
+    // 3. Cek Pending Request Lain (Optional: Batasi 1 request pending per user)
+    const existingPending = await PayoutRequest.findOne({ 
+        userId, 
+        status: 'pending' 
+    }).session(session);
+
+    if (existingPending) {
+        throw new Error('Anda masih memiliki permintaan pencairan yang sedang diproses.');
+    }
+
+    // 4. Potong Saldo User (Escrow)
+    user.balance -= amount;
+    await user.save({ session });
+
+    // 5. Buat Record Request
+    const payoutRequest = new PayoutRequest({
+        providerId: provider._id,
+        userId: userId,
+        amount: amount,
+        bankSnapshot: {
+            bankName: provider.bankAccount.bankName,
+            accountNumber: provider.bankAccount.accountNumber,
+            accountHolderName: provider.bankAccount.accountHolderName || user.fullName
+        },
+        status: 'pending'
+    });
+    
+    await payoutRequest.save({ session });
+
+    await session.commitTransaction();
+    
+    res.status(201).json({
+        message: 'Permintaan pencairan berhasil dikirim. Admin akan memproses transfer.',
+        data: payoutRequest,
+        remainingBalance: user.balance
+    });
+
+  } catch (error) {
+    await session.abortTransaction();
+    if (error.message.includes('Saldo') || error.message.includes('Bank') || error.message.includes('pending')) {
+        return res.status(400).json({ message: error.message });
+    }
+    next(error);
+  } finally {
+    session.endSession();
+  }
+}
+
+// [BARU] 7. PROVIDER: List Payout History
+async function listPayoutHistory(req, res, next) {
+    try {
+        const userId = req.user.userId;
+        const history = await PayoutRequest.find({ userId })
+            .sort({ createdAt: -1 })
+            .lean();
+
+        res.json({
+            message: 'Riwayat pencairan berhasil diambil',
+            data: history
+        });
+    } catch (error) {
+        next(error);
+    }
+}
+
 module.exports = {
   listEarnings,
   getEarningsSummary,
   getPlatformStats,
   listAllEarnings,
-  processPayout
+  processPayout,
+  requestPayout, // Export baru
+  listPayoutHistory // Export baru
 };

@@ -45,10 +45,15 @@ router.use(authenticate);
 
 router.get('/incoming', controller.listIncomingOrders);
 router.patch('/:orderId/accept', controller.acceptOrder); 
+// [BARU] Route Reject
+router.patch('/:orderId/reject', controller.rejectOrder);
 router.patch('/:orderId/status', controller.updateOrderStatus);
 
 // [BARU] Endpoint Request Biaya Tambahan
 router.post('/:orderId/additional-fee', controller.requestAdditionalFee);
+
+// [BARU] Endpoint Void Biaya Tambahan (Provider Cancel Request)
+router.delete('/:orderId/fees/:feeId', controller.voidAdditionalFee);
 
 // [BARU] Endpoint Reject Biaya Tambahan (Sesuai Frontend)
 router.put('/:orderId/fees/:feeId/reject', controller.rejectAdditionalFee);
