@@ -188,23 +188,19 @@ async function login(req, res, next) {
 
     // [FIX - UPDATE LOGIKA] 
     // Selalu cek data provider terlepas dari activeRole.
-    // Ini memastikan user yang baru verified (tapi activeRole masih customer) tetap dapat statusnya di token.
     let providerStatus = null;
     const provider = await Provider.findOne({ userId: user._id });
     
     if (provider) {
       providerStatus = provider.verificationStatus;
       
-      // [AUTO SWITCH] Auto-switch ke provider jika sudah verified tapi masih customer
-      // Ini menyelesaikan masalah redirect loop di frontend
-      if (providerStatus === 'verified' && user.activeRole === 'customer') {
-         // Pastikan role provider ada di array roles
+      // [PERBAIKAN] Jika status sudah verified, pastikan role 'provider' ada di list roles
+      // TAPI JANGAN ubah activeRole secara otomatis agar tidak mengunci user di mode provider
+      if (providerStatus === 'verified') {
          if (!user.roles.includes('provider')) {
             user.roles.push('provider');
+            await user.save();
          }
-         // Set active role
-         user.activeRole = 'provider';
-         await user.save();
       }
     }
 
@@ -479,7 +475,7 @@ async function switchRole(req, res, next) {
 }
 
 // ===================
-// REGISTER PARTNER (FIXED LOCATION STRUCTURE)
+// REGISTER PARTNER (FIXED LOCATION STRUCTURE & SERVICES)
 // ===================
 async function registerPartner(req, res, next) {
   try {
@@ -511,7 +507,8 @@ async function registerPartner(req, res, next) {
       experienceYears, description, serviceCategory, vehicleType,
       nik, dateOfBirth, gender, domicileAddress,
       bankName, bankAccountNumber, bankAccountHolder,
-      emergencyName, emergencyRelation, emergencyPhone
+      emergencyName, emergencyRelation, emergencyPhone,
+      selectedServices // [BARU] Input untuk layanan yang dipilih
     } = req.body;
 
     const files = req.files || {};
@@ -528,9 +525,6 @@ async function registerPartner(req, res, next) {
     };
 
     // [FIX] Validasi Struktur Lokasi sesuai Schema Provider
-    // Provider Schema mengharapkan address sebagai Object { fullAddress, district, ... }
-    // Bukan string biasa.
-    
     let providerLocation = {
         type: 'Point',
         coordinates: [0, 0], // Default di laut
@@ -551,9 +545,24 @@ async function registerPartner(req, res, next) {
         }
         
         // Opsional: Jika user punya detail alamat yang lebih lengkap, bisa dicopy
-        // Tapi prioritas adalah input 'domicileAddress' dari form registrasi mitra
         if (!domicileAddress && user.address && user.address.detail) {
              providerLocation.address.fullAddress = user.address.detail;
+        }
+    }
+
+    // [BARU] Parsing & Validasi Selected Services
+    let parsedServices = [];
+    if (selectedServices) {
+        try {
+            // FormData mengirim array/object sebagai JSON string
+            parsedServices = typeof selectedServices === 'string' 
+                ? JSON.parse(selectedServices) 
+                : selectedServices;
+            
+            // Validasi format: Harus array
+            if (!Array.isArray(parsedServices)) throw new Error();
+        } catch (e) {
+            return res.status(400).json({ message: 'Format layanan yang dipilih tidak valid.' });
         }
     }
 
@@ -570,7 +579,7 @@ async function registerPartner(req, res, next) {
             dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
             gender: gender || 'Laki-laki'
         },
-        domicileAddress: domicileAddress || '', // Field legacy (opsional disimpan juga)
+        domicileAddress: domicileAddress || '', 
         
         bankAccount: {
             bankName: bankName || '',
@@ -591,7 +600,15 @@ async function registerPartner(req, res, next) {
             vehicleType: vehicleType || ''
         },
         
-        services: existingProvider ? existingProvider.services : [],
+        // [UPDATE] Simpan layanan yang dipilih user
+        // Menggunakan map untuk memastikan struktur sesuai providerServiceSchema
+        services: parsedServices.map(s => ({
+            serviceId: s.serviceId,
+            price: Number(s.price),
+            description: s.description || '',
+            isActive: true
+        })),
+
         rating: existingProvider ? existingProvider.rating : 0
     };
 
