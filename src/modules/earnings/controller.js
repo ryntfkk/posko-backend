@@ -246,15 +246,7 @@ async function requestPayout(req, res, next) {
         throw new Error('Mohon lengkapi data Rekening Bank di menu Pengaturan Akun sebelum mencairkan dana.');
     }
 
-    // 2. Cek Saldo User
-    const user = await User.findById(userId).session(session);
-    if (!user) throw new Error('User tidak ditemukan');
-
-    if (user.balance < amount) {
-        throw new Error(`Saldo tidak mencukupi. Saldo saat ini: Rp ${user.balance.toLocaleString()}`);
-    }
-
-    // 3. Cek Pending Request Lain (Optional: Batasi 1 request pending per user)
+    // 2. Cek Pending Request Lain (Dipindahkan ke atas untuk efisiensi)
     const existingPending = await PayoutRequest.findOne({ 
         userId, 
         status: 'pending' 
@@ -264,11 +256,27 @@ async function requestPayout(req, res, next) {
         throw new Error('Anda masih memiliki permintaan pencairan yang sedang diproses.');
     }
 
-    // 4. Potong Saldo User (Escrow)
-    user.balance -= amount;
-    await user.save({ session });
+    // 3. ATOMIC UPDATE & DEDUCTION (Perbaikan Utama)
+    // Menggunakan findOneAndUpdate dengan kondisi balance >= amount
+    // Jika saldo cukup, kurangi (-amount). Jika tidak, kembalikan null.
+    // Ini atomic operation, aman dari race condition.
+    const updatedUser = await User.findOneAndUpdate(
+        { 
+          _id: userId, 
+          balance: { $gte: amount } // Guard clause di level query DB
+        },
+        { $inc: { balance: -amount } },
+        { new: true, session: session }
+    );
 
-    // 5. Buat Record Request
+    if (!updatedUser) {
+        // Cek manual untuk memberi pesan error yang jelas (Saldo kurang atau User hilang)
+        const userCheck = await User.findById(userId).session(session);
+        if (!userCheck) throw new Error('User tidak ditemukan');
+        throw new Error(`Saldo tidak mencukupi. Saldo saat ini: Rp ${userCheck.balance.toLocaleString()}`);
+    }
+
+    // 4. Buat Record Request
     const payoutRequest = new PayoutRequest({
         providerId: provider._id,
         userId: userId,
@@ -276,7 +284,7 @@ async function requestPayout(req, res, next) {
         bankSnapshot: {
             bankName: provider.bankAccount.bankName,
             accountNumber: provider.bankAccount.accountNumber,
-            accountHolderName: provider.bankAccount.accountHolderName || user.fullName
+            accountHolderName: provider.bankAccount.accountHolderName || updatedUser.fullName
         },
         status: 'pending'
     });
@@ -288,7 +296,7 @@ async function requestPayout(req, res, next) {
     res.status(201).json({
         message: 'Permintaan pencairan berhasil dikirim. Admin akan memproses transfer.',
         data: payoutRequest,
-        remainingBalance: user.balance
+        remainingBalance: updatedUser.balance
     });
 
   } catch (error) {

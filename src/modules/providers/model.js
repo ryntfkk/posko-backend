@@ -126,9 +126,13 @@ providerSchema.index({ location: '2dsphere' });
 // Index performa (Compound Index tetap perlu didefinisikan manual)
 providerSchema.index({ 'services.serviceId': 1, 'services.isActive': 1 });
 
-// [PERBAIKAN] Menghapus index duplikat karena sudah didefinisikan via `index: true` di schema options di atas.
-// providerSchema.index({ verificationStatus: 1 }); <--- DIHAPUS
-// providerSchema.index({ isOnline: 1 });           <--- DIHAPUS
+// [PERFORMANCE] Text Index untuk Pencarian Cepat (Bio & Alamat)
+// Ini menggantikan kebutuhan Regex berat pada field-field ini
+providerSchema.index({ 
+  'location.address.city': 'text', 
+  'location.address.district': 'text',
+  'bio': 'text' 
+});
 
 const Provider = mongoose.model('Provider', providerSchema);
 

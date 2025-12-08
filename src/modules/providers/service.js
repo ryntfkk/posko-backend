@@ -6,11 +6,6 @@ const Service = require('../services/model');
 const Order = require('../orders/model');
 const { Types } = require('mongoose');
 
-// Helper: Escape Regex
-function escapeRegex(text) {
-  return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
-}
-
 class ProviderService {
   
   // [OPTIMIZATION] Helper untuk booked dates dengan batas waktu logis
@@ -114,50 +109,62 @@ class ProviderService {
         matchStage.isOnline = true;
     }
 
-    // [PERFORMANCE FIX] Category Filter: Pre-fetch Service IDs
+    // [REFACTOR] Category Filter: Exact Match / Index optimized
     if (category && typeof category === 'string' && category.trim() !== '') {
-        const normalizedCategory = decodeURIComponent(category).trim().replace(/-/g, ' ');
-        const categoryRegex = new RegExp(`^${escapeRegex(normalizedCategory)}$`, 'i');
+        const normalizedCategory = decodeURIComponent(category).trim();
+        // Gunakan pencarian Text / Exact pada Service, bukan Regex di Aggregation
+        // Karena Service Schema punya text index, kita bisa gunakan itu atau exact match
         
-        const matchedServices = await Service.find({ category: categoryRegex }).select('_id').lean();
+        // Strategi: Cari Service IDs yang relevan dulu
+        const matchedServices = await Service.find({ 
+            $text: { $search: normalizedCategory } 
+        }).select('_id').lean();
+        
         const searchServiceIds = matchedServices.map(s => s._id);
 
         if (searchServiceIds.length > 0) {
             matchStage['services.serviceId'] = { $in: searchServiceIds };
             matchStage['services.isActive'] = true; 
         } else {
-            return { data: [], meta: { count: 0, locationSource } };
+             // Fallback: Jika text search gagal, coba exact match category field
+             const exactServices = await Service.find({ category: normalizedCategory }).select('_id').lean();
+             if (exactServices.length > 0) {
+                 const exactIds = exactServices.map(s => s._id);
+                 matchStage['services.serviceId'] = { $in: exactIds };
+                 matchStage['services.isActive'] = true;
+             } else {
+                 return { data: [], meta: { count: 0, locationSource } };
+             }
         }
     }
 
-    // [PERFORMANCE FIX] Text Search: Pre-fetch IDs (User & Service)
-    // Strategi: Cari User ID dan Service ID yang cocok dengan kata kunci DI AWAL.
-    // Lalu masukkan ID tersebut ke query utama ($match).
-    // Ini menghindari Regex search pada field hasil lookup yang membunuh performa.
+    // [REFACTOR] Text Search: Full Index Utilization (No Regex)
     if (search && typeof search === 'string' && search.trim() !== '') {
-        const searchRegex = new RegExp(escapeRegex(search.trim()), 'i');
+        const searchQuery = search.trim();
 
-        // Parallel Pre-queries
-        const [matchingUsers, matchingServices] = await Promise.all([
-            User.find({ fullName: { $regex: searchRegex } }).select('_id').lean(),
-            Service.find({ 
-              $or: [
-                { name: { $regex: searchRegex } },
-                { category: { $regex: searchRegex } }
-              ] 
-            }).select('_id').lean()
+        // Parallel Index Scans (O(log N))
+        const [matchingUsers, matchingServices, matchingProviders] = await Promise.all([
+            // Cari User (Nama)
+            User.find({ $text: { $search: searchQuery } }).select('_id').lean(),
+            
+            // Cari Service (Nama/Desc/Tags)
+            Service.find({ $text: { $search: searchQuery } }).select('_id').lean(),
+
+            // Cari Provider (Bio/City/District - via Text Index Provider)
+            Provider.find({ $text: { $search: searchQuery } }).select('_id').lean()
         ]);
 
         const searchUserIds = matchingUsers.map(u => u._id);
         const searchServiceIds = matchingServices.map(s => s._id);
+        const searchProviderIds = matchingProviders.map(p => p._id);
 
-        const orConditions = [
-            { userId: { $in: searchUserIds } }, // Match by Provider Name
-            { 'location.address.city': { $regex: searchRegex } },
-            { 'location.address.district': { $regex: searchRegex } }
-        ];
+        // Gabungkan kondisi dengan $or
+        const orConditions = [];
 
-        // Jika ada service yang cocok, tambahkan ke kriteria pencarian
+        if (searchUserIds.length > 0) {
+            orConditions.push({ userId: { $in: searchUserIds } });
+        }
+        
         if (searchServiceIds.length > 0) {
             orConditions.push({
                 'services': {
@@ -167,6 +174,15 @@ class ProviderService {
                     }
                 }
             });
+        }
+
+        if (searchProviderIds.length > 0) {
+            orConditions.push({ _id: { $in: searchProviderIds } });
+        }
+
+        // Jika tidak ada yang cocok sama sekali
+        if (orConditions.length === 0) {
+            return { data: [], meta: { count: 0, locationSource } };
         }
 
         matchStage.$or = orConditions;
@@ -184,7 +200,7 @@ class ProviderService {
           distanceField: "distance",
           maxDistance: 20000, // 20 KM
           spherical: true,
-          query: matchStage // Index Scan terjadi di sini
+          query: matchStage // Index filtering terjadi di sini
         }
       });
     } else {
@@ -265,7 +281,7 @@ class ProviderService {
       data: providers,
       meta: {
         locationSource,
-        count: providers.length, // Note: For total count in pagination, separate query is needed ideally
+        count: providers.length, 
         page: pageNum,
         limit: limitNum
       }

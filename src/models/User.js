@@ -1,3 +1,4 @@
+// src/models/User.js
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 
@@ -131,7 +132,11 @@ const userSchema = new mongoose.Schema({
   // Menyimpan kapan data dibuat (createdAt) dan diupdate (updatedAt) secara otomatis
 }, { timestamps: true });
 
+// [PERFORMANCE] Index Geo-Spatial
 userSchema.index({ location: '2dsphere' });
+
+// [PERFORMANCE] Text Index untuk Pencarian Cepat Nama
+userSchema.index({ fullName: 'text' });
 
 userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
