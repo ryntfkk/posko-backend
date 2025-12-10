@@ -1,3 +1,4 @@
+// src/index.js
 const express = require('express');
 const cors = require('cors');
 const http = require('http'); // Tetap butuh untuk local dev
@@ -20,13 +21,13 @@ const paymentRoutes = require('./modules/payments/routes');
 const chatRoutes = require('./modules/chat/routes');
 const settingsRoutes = require('./modules/settings/routes');
 const voucherRoutes = require('./modules/vouchers/routes');
-const earningsRoutes = require('./modules/earnings/routes'); // [BARU] Import route earnings
-const uploadRoutes = require('./modules/upload/routes'); // [BARU] Import route upload
+const earningsRoutes = require('./modules/earnings/routes'); 
+const uploadRoutes = require('./modules/upload/routes'); // [PENTING] Import route upload
 const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
 
-// [FIXED] Konfigurasi CORS dengan multiple origins yang aman
+// Konfigurasi CORS dengan multiple origins yang aman
 const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = env.corsOrigins;
@@ -80,7 +81,7 @@ app.use('/api/services', requireDbConnection, serviceRoutes);
 app.use('/api/settings', requireDbConnection, settingsRoutes);
 app.use('/api/vouchers', requireDbConnection, voucherRoutes);
 app.use('/api/earnings', requireDbConnection, earningsRoutes); 
-app.use('/api/upload', requireDbConnection, uploadRoutes); // [BARU] Endpoint upload
+app.use('/api/upload', requireDbConnection, uploadRoutes); // [PENTING] Endpoint upload didaftarkan
 
 app.use(errorHandler);
 
