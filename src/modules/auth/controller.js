@@ -378,10 +378,11 @@ async function updateProfile(req, res, next) {
     const userId = req.user.userId;
     const updates = { ...req.body };
 
-    if (req.file) {
-      updates.profilePictureUrl = `/uploads/${req.file.filename}`;
-    }
-
+    // [MODIFIKASI S3] 
+    // Kita hapus logika req.file di sini karena upload dilakukan via endpoint terpisah /api/upload
+    // Controller ini hanya menerima URL string via req.body.profilePictureUrl
+    
+    // Filter field yang tidak boleh diupdate manual
     const forbiddenFields = ['password', 'balance', 'roles', 'activeRole', 'email', 'status', 'refreshTokens'];
     forbiddenFields.forEach(field => delete updates[field]);
 
