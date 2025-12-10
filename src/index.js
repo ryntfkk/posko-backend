@@ -1,10 +1,9 @@
-// src/index.js
 const express = require('express');
 const cors = require('cors');
-const http = require('http'); // Tetap butuh untuk local dev
+const http = require('http'); // Tetap butuh untuk local dev dan EC2
 const env = require('./config/env');
 const { i18nMiddleware } = require('./config/i18n');
-// Socket tetap diimport supaya tidak error, walau tidak jalan di Vercel
+// Socket diimport untuk inisialisasi
 const { initSocket } = require('./modules/chat/socket'); 
 
 // Import database utilities
@@ -22,12 +21,12 @@ const chatRoutes = require('./modules/chat/routes');
 const settingsRoutes = require('./modules/settings/routes');
 const voucherRoutes = require('./modules/vouchers/routes');
 const earningsRoutes = require('./modules/earnings/routes'); 
-const uploadRoutes = require('./modules/upload/routes'); // [PENTING] Import route upload
+const uploadRoutes = require('./modules/upload/routes'); // [BARU] Import route upload
 const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
 
-// Konfigurasi CORS dengan multiple origins yang aman
+// [FIXED] Konfigurasi CORS dengan multiple origins yang aman
 const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = env.corsOrigins;
@@ -55,7 +54,7 @@ app.use(express.json());
 
 // Health Check
 app.get('/', (req, res) => {
-  res.status(200).send('Posko Backend Vercel is Running! ');
+  res.status(200).send('Posko Backend is Running on EC2! ');
 });
 
 // Database Health Check Endpoint
@@ -81,32 +80,30 @@ app.use('/api/services', requireDbConnection, serviceRoutes);
 app.use('/api/settings', requireDbConnection, settingsRoutes);
 app.use('/api/vouchers', requireDbConnection, voucherRoutes);
 app.use('/api/earnings', requireDbConnection, earningsRoutes); 
-app.use('/api/upload', requireDbConnection, uploadRoutes); // [PENTING] Endpoint upload didaftarkan
+app.use('/api/upload', requireDbConnection, uploadRoutes); // [PENTING] Endpoint upload didaftarkan di sini
 
 app.use(errorHandler);
 
-// --- DATABASE CONNECTION (SERVERLESS FRIENDLY) ---
+// --- DATABASE CONNECTION ---
 // Initialize database connection at startup
-// This is called but not blocking - the middleware will ensure connection per request
 connectDB().catch((err) => {
   console.error('❌ Initial database connection failed:', err.message);
 });
 
-// --- EKSPOR APLIKASI UNTUK VERCEL ---
+// --- EKSPOR APLIKASI ---
 module.exports = app;
 
-// --- JALANKAN SERVER UNTUK LOCALHOST SAJA ---
-// Kode di bawah ini HANYA jalan kalau dijalankan di laptop (node src/index.js)
-// Di Vercel, kode di bawah ini akan diabaikan (karena require. main !== module)
+// --- JALANKAN SERVER (EC2 / Localhost) ---
+// Kode ini akan dieksekusi saat dijalankan dengan `node src/index.js` atau PM2
 if (require.main === module) {
   const server = http.createServer(app);
   const PORT = process.env.PORT || 4000;
   
-  // Socket hanya jalan di local
+  // Inisialisasi Socket.io
   initSocket(server);
 
   server.listen(PORT, () => {
-    console.log(`🚀 Server Local berjalan di port ${PORT}`);
-    console.log(`✅ CORS Origins diizinkan: ${env.corsOrigins.join(', ')}`);
+    console.log(`🚀 Server berjalan di port ${PORT}`);
+    console.log(`✅ CORS Origins diizinkan: ${env.corsOrigins ? env.corsOrigins.join(', ') : 'All'}`);
   });
 }

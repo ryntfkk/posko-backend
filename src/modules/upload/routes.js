@@ -1,18 +1,21 @@
-// src/modules/upload/routes.js
 const express = require('express');
 const router = express.Router();
-const uploadS3 = require('../../config/3Upload'); 
+const upload = require('../../config/s3Upload');
 const { uploadImage } = require('./controller');
-const authenticate = require('../../middlewares/auth');
 const requireDbConnection = require('../../middlewares/dbHealth');
+const { isAuthenticated, requireAdmin } = require('../../middlewares/auth');
 
 // Endpoint: POST /api/upload
-// Menggunakan middleware 'image' sesuai key yang dikirim frontend (FormData)
+// Route ini akan dimount di /api/upload pada index.js, jadi di sini cukup '/'
+// Middleware urutannya:
+// 1. isAuthenticated: Pastikan user login
+// 2. upload.single('image'): Proses multipart/form-data dan upload ke S3
+// 3. uploadImage: Controller untuk mengembalikan URL ke frontend
+
 router.post(
   '/', 
-  requireDbConnection, // Cek kesehatan DB dulu
-  authenticate,        // Wajib login
-  uploadS3.single('image'), 
+  isAuthenticated, 
+  upload.single('image'), 
   uploadImage
 );
 
