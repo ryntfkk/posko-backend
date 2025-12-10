@@ -45,7 +45,6 @@ async function createRoom(req, res, next) {
     }
 
     // [RULE] Jika Target adalah Mitra, pastikan dia SUDAH TERVERIFIKASI
-    // Ini mencegah customer menghubungi mitra yang pending/rejected/suspended
     const targetProvider = await Provider.findOne({ userId: targetUserId });
     if (targetProvider) {
         if (targetProvider.verificationStatus !== 'verified') {
@@ -98,22 +97,21 @@ async function getChatDetail(req, res, next) {
   }
 }
 
-// [BARU] Upload Attachment
+// [BARU] Upload Attachment via S3
 async function uploadAttachment(req, res, next) {
   try {
     if (!req.file) {
       return res.status(400).json({ message: 'Tidak ada file yang diupload' });
     }
     
-    // Construct URL (Asumsi file disimpan di folder public/uploads backend)
-    // Pastikan app.use(express.static('public')) ada di app.js/index.js
-    const fileUrl = `/uploads/${req.file.filename}`;
+    // [MODIFIKASI S3] Ambil URL langsung dari location
+    const fileUrl = req.file.location;
 
     res.json({ 
       message: 'Upload berhasil', 
       data: { 
         url: fileUrl, 
-        type: 'image', // Sementara hardcode image karena filter multer
+        type: 'image', // Sementara hardcode image
         originalName: req.file.originalname
       } 
     });

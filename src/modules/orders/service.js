@@ -826,7 +826,7 @@ class OrderService {
     return updatedOrder;
   }
 
-  // [BARU] REJECT ORDER
+  // REJECT ORDER
   async rejectOrder(user, orderId) {
     const provider = await Provider.findOne({ userId: user.userId });
     if (!provider) throw new Error('Provider not found');
@@ -998,7 +998,7 @@ class OrderService {
     return order;
   }
 
-  // [BARU] VOID ADDITIONAL FEE (PROVIDER CANCEL REQUEST)
+  // VOID ADDITIONAL FEE (PROVIDER CANCEL REQUEST)
   async voidAdditionalFee(user, orderId, feeId) {
     const provider = await Provider.findOne({ userId: user.userId });
     if (!provider) throw new Error('Unauthorized provider');
@@ -1036,8 +1036,9 @@ class OrderService {
     }
     if (order.status !== 'working') throw new Error('Hanya bisa diupload saat status "working".');
 
+    // [MODIFIKASI S3] Gunakan file.location dari Multer S3
     order.completionEvidence.push({
-      url: `/uploads/${file.filename}`,
+      url: file.location,
       type: 'photo',
       description: description || 'Bukti penyelesaian pekerjaan',
       uploadedAt: new Date()
