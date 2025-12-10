@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const http = require('http'); // Tetap butuh untuk local dev dan EC2
+const http = require('http');
 const env = require('./config/env');
 const { i18nMiddleware } = require('./config/i18n');
 // Socket diimport untuk inisialisasi
@@ -26,20 +26,41 @@ const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
 
-// [UPDATED] Konfigurasi CORS yang lebih informatif untuk debugging
+// --- 1. SETUP LOGGING (PENTING UNTUK DEBUGGING 502) ---
+// Middleware ini akan mencatat setiap request yang masuk ke EC2
+app.use((req, res, next) => {
+  const start = Date.now();
+  // Tangkap saat response selesai dikirim
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    const time = new Date().toISOString();
+    // Format Log: [WAKTU] METHOD URL STATUS - DURASI
+    const logMessage = `[${time}] ${req.method} ${req.url} ${res.statusCode} - ${duration}ms`;
+    
+    // Warna log sederhana untuk membedakan error (Status >= 400)
+    if (res.statusCode >= 400) {
+      console.error('❌ ' + logMessage);
+    } else {
+      console.log('✅ ' + logMessage);
+    }
+  });
+  next();
+});
+
+// --- 2. SETUP CORS YANG LEBIH ROBUST ---
 const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = env.corsOrigins || [];
     
-    // Allow requests with no origin (like mobile apps, curl requests, or server-to-server)
+    // Izinkan request tanpa origin (seperti dari Postman, Mobile App, atau Server-to-Server request)
     if (!origin) return callback(null, true);
     
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      // Log peringatan tapi jangan crash, membantu debug jika frontend deploy URL berubah
-      console.warn(`⚠️ CORS blocked request from origin: ${origin}`);
-      callback(new Error(`Not allowed by CORS policy: ${origin}`));
+      // Log warning tapi jangan crash app, berikan pesan error jelas
+      console.warn(`⚠️  CORS Blocked request from origin: ${origin}`);
+      callback(new Error(`CORS policy blocked access from origin: ${origin}`));
     }
   },
   credentials: true,
@@ -48,40 +69,18 @@ const corsOptions = {
   optionsSuccessStatus: 200
 };
 
-// Middleware: Logger untuk setiap request (PENTING untuk debug 502)
-// Ini akan mencatat setiap request yang berhasil masuk ke server EC2
-app.use((req, res, next) => {
-  const start = Date.now();
-  const { method, url } = req;
-  
-  // Event listener saat response selesai dikirim
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    const status = res.statusCode;
-    
-    // Log format: [WAKTU] METHOD URL STATUS - DURASI
-    console.log(`[${new Date().toISOString()}] ${method} ${url} ${status} - ${duration}ms`);
-    
-    // Jika status 500 ke atas, beri highlight warning
-    if (status >= 500) {
-      console.error(`❌ Server Error on ${method} ${url}`);
-    }
-  });
-  
-  next();
-});
-
 app.use(cors(corsOptions));
 app.use(i18nMiddleware);
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // Tambahan untuk parsing form data standar
+app.use(express.urlencoded({ extended: true })); // Tambahan agar bisa parse form-data standar
 
-// Health Check Root (Tanpa DB check agar Load Balancer bisa ping cepat)
+// --- 3. HEALTH CHECK ROUTES ---
+// Route root sederhana untuk cek server hidup (tanpa cek DB)
 app.get('/', (req, res) => {
-  res.status(200).send('Posko Backend is Running on EC2! ');
+  res.status(200).send('Posko Backend is Running on EC2!');
 });
 
-// Database Health Check Endpoint
+// Database Health Check Endpoint (Detail)
 app.get('/api/health', (req, res) => {
   const dbStatus = getConnectionStatus();
   const statusCode = dbStatus.isConnected ? 200 : 503;
@@ -93,6 +92,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// --- 4. ROUTES APLIKASI ---
 // Apply database health check middleware to all API routes that need database
 app.use('/api/auth', requireDbConnection, authRoutes);
 app.use('/api/orders', requireDbConnection, orderRoutes);
@@ -109,36 +109,35 @@ app.use('/api/upload', requireDbConnection, uploadRoutes);
 // Global Error Handler
 app.use(errorHandler);
 
-// Global Uncaught Exception Handler (Mencegah server mati mendadak)
+// --- 5. DB CONNECTION & SERVER STARTUP ---
+// Initialize database connection at startup
+connectDB().catch((err) => {
+  console.error('❌ Critical: Initial database connection failed:', err.message);
+  // Kita tidak exit process disini agar server HTTP tetap bisa jalan untuk debugging health check
+});
+
+// Menangani error yang tidak tertangkap agar server tidak mati mendadak
 process.on('uncaughtException', (err) => {
-  console.error('🔥 UNCAUGHT EXCEPTION! Server tetap berjalan, tapi periksa ini:', err);
+  console.error('🔥 UNCAUGHT EXCEPTION! Server tetap berjalan. Error:', err);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('🔥 UNHANDLED REJECTION! Server tetap berjalan, tapi periksa ini:', reason);
+  console.error('🔥 UNHANDLED REJECTION! Server tetap berjalan. Reason:', reason);
 });
 
-// --- DATABASE CONNECTION ---
-// Initialize database connection at startup
-connectDB().catch((err) => {
-  console.error('❌ Initial database connection failed:', err.message);
-  // Jangan process.exit(1) di sini agar server HTTP tetap bisa jalan untuk health check log
-});
-
-// --- EKSPOR APLIKASI ---
 module.exports = app;
 
-// --- JALANKAN SERVER (EC2 / Localhost) ---
-// Kode ini akan dieksekusi saat dijalankan dengan `node src/index.js` atau PM2
+// --- EKSKEKUSI SERVER ---
 if (require.main === module) {
   const server = http.createServer(app);
-  const PORT = process.env.PORT || 4000; // Pastikan port ini terbuka di Security Group AWS
+  const PORT = process.env.PORT || 4000;
   
   // Inisialisasi Socket.io
   initSocket(server);
 
-  server.listen(PORT, '0.0.0.0', () => { // Bind ke 0.0.0.0 agar bisa diakses publik (penting untuk EC2)
+  // PENTING: Listen ke '0.0.0.0' agar bisa diakses dari Public IP EC2
+  server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server berjalan di port ${PORT}`);
-    console.log(`📡 Menunggu request dari origins: ${env.corsOrigins ? env.corsOrigins.join(', ') : 'All'}`);
+    console.log(`📡 Menunggu request... (CORS Origins: ${env.corsOrigins ? env.corsOrigins.join(', ') : 'All'})`);
   });
 }
