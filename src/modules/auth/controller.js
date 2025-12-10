@@ -21,7 +21,7 @@ function generateTokens(user, providerStatus = null) {
     roles: user.roles,
     activeRole: user.activeRole,
     role: user.activeRole, // Backward compatibility
-    providerStatus: providerStatus // [BARU] Masukkan status verifikasi ke token
+    providerStatus: providerStatus // Masukkan status verifikasi ke token
   };
 
   const accessToken = jwt.sign(payload, env.jwtSecret, { expiresIn: '15m' });
@@ -34,11 +34,11 @@ function generateTokens(user, providerStatus = null) {
 function setAuthCookies(res, accessToken, refreshToken) {
   const isProduction = env.nodeEnv === 'production';
   
-  // Cookie untuk Access Token (dibaca oleh Middleware)
+  // Cookie untuk Access Token
   res.cookie('posko_token', accessToken, {
-    httpOnly: true, // Tidak bisa diakses JS client (aman dari XSS)
-    secure: isProduction, // HTTPS only di production
-    sameSite: isProduction ? 'none' : 'lax', // Cross-site cookie handling
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'lax',
     maxAge: 15 * 60 * 1000 // 15 menit
   });
 
@@ -64,7 +64,7 @@ function clearAuthCookies(res) {
   res.clearCookie('posko_refresh_token', cookieOptions);
 }
 
-// [FIX] Helper untuk handling MongoDB duplicate key error
+// Helper untuk handling MongoDB duplicate key error
 function isDuplicateKeyError(error) {
   return error.code === 11000 || error.name === 'MongoServerError' && error.message.includes('duplicate key');
 }
@@ -80,7 +80,7 @@ async function register(req, res, next) {
       bio, birthDate, phoneNumber, balance, status,
     } = req.body;
 
-    // [FIX] Cek email sudah terdaftar sebelum create
+    // Cek email sudah terdaftar sebelum create
     const existingUser = await User.findOne({ email: email.toLowerCase() });
     if (existingUser) {
       const messageKey = 'auth.email_already_exists';
@@ -90,7 +90,7 @@ async function register(req, res, next) {
       });
     }
 
-    // [PERBAIKAN] Force role selalu 'customer' untuk pendaftaran publik
+    // Force role selalu 'customer' untuk pendaftaran publik
     const forcedRoles = ['customer'];
     const forcedActiveRole = 'customer';
 
@@ -113,14 +113,11 @@ async function register(req, res, next) {
     
     await user.save();
     
-    // Generate tokens (providerStatus null untuk customer baru)
     const { accessToken, refreshToken } = generateTokens(user, null);
     
-    // Simpan refresh token
     user.refreshTokens = [refreshToken];
     await user.save();
     
-    // Set Cookies
     setAuthCookies(res, accessToken, refreshToken);
 
     const messageKey = 'auth.register_success';
@@ -156,7 +153,6 @@ async function login(req, res, next) {
     
     console.log(`Login attempt for: ${email}`);
 
-    // Case-insensitive email lookup
     const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) {
       console.warn(`Login failed: User not found (${email})`);
@@ -186,16 +182,12 @@ async function login(req, res, next) {
       });
     }
 
-    // [FIX - UPDATE LOGIKA] 
-    // Selalu cek data provider terlepas dari activeRole.
+    // Cek data provider
     let providerStatus = null;
     const provider = await Provider.findOne({ userId: user._id });
     
     if (provider) {
       providerStatus = provider.verificationStatus;
-      
-      // [PERBAIKAN] Jika status sudah verified, pastikan role 'provider' ada di list roles
-      // TAPI JANGAN ubah activeRole secara otomatis agar tidak mengunci user di mode provider
       if (providerStatus === 'verified') {
          if (!user.roles.includes('provider')) {
             user.roles.push('provider');
@@ -218,7 +210,6 @@ async function login(req, res, next) {
     console.log(`Login success for: ${email}`);
 
     const safeUser = sanitizeUser(user);
-    // Masukkan status provider ke object profile response juga
     if (providerStatus) {
       safeUser.providerStatus = providerStatus;
     }
@@ -273,25 +264,21 @@ async function refreshToken(req, res, next) {
       });
     }
 
-    // [FIX] Fetch ulang status provider saat refresh token
     let providerStatus = null;
     const provider = await Provider.findOne({ userId: user._id });
     if (provider) {
       providerStatus = provider.verificationStatus;
     }
 
-    // Rotate Tokens
     const newTokens = generateTokens(user, providerStatus);
 
     const tokenIndex = user.refreshTokens.indexOf(refreshToken);
     if (tokenIndex !== -1) {
-      // Hapus token lama dan ganti dengan yang baru
       user.refreshTokens[tokenIndex] = newTokens.refreshToken;
     } else {
       user.refreshTokens.push(newTokens.refreshToken);
     }
     
-    // Bersihkan token yang sudah sangat tua jika array terlalu besar (opsional safety)
     if (user.refreshTokens.length > 10) {
         user.refreshTokens = user.refreshTokens.slice(-5);
     }
@@ -351,8 +338,6 @@ async function getProfile(req, res, next) {
 
     const safeUser = sanitizeUser(user);
 
-    // [ADD] Inject provider verification status ke profile response
-    // Selalu cek provider table jika user memiliki potensi role provider
     const provider = await Provider.findOne({ userId: user._id }).select('verificationStatus');
     if (provider) {
         safeUser.providerStatus = provider.verificationStatus;
@@ -379,8 +364,10 @@ async function updateProfile(req, res, next) {
     const updates = { ...req.body };
 
     // [MODIFIKASI S3] 
-    // Kita hapus logika req.file di sini karena upload dilakukan via endpoint terpisah /api/upload
-    // Controller ini hanya menerima URL string via req.body.profilePictureUrl
+    // Jika ada file yang diupload melalui middleware S3 (via route), gunakan location-nya
+    if (req.file && req.file.location) {
+      updates.profilePictureUrl = req.file.location;
+    }
     
     // Filter field yang tidak boleh diupdate manual
     const forbiddenFields = ['password', 'balance', 'roles', 'activeRole', 'email', 'status', 'refreshTokens'];
@@ -433,7 +420,6 @@ async function switchRole(req, res, next) {
 
     let providerStatus = null;
 
-    // [CHECK] Jika switch ke provider, ambil status verifikasi
     if (role === 'provider') {
         const provider = await Provider.findOne({ userId });
         if (!provider) {
@@ -442,9 +428,6 @@ async function switchRole(req, res, next) {
         
         providerStatus = provider.verificationStatus;
 
-        // Validasi: Apakah boleh switch jika rejected/suspended?
-        // Kita izinkan switch agar user bisa melihat halaman "Rejected" dan memperbaiki data,
-        // tapi middleware frontend akan memblokir akses ke dashboard.
         if (provider.verificationStatus === 'suspended') {
              return res.status(403).json({ message: 'Akun Mitra Anda ditangguhkan. Hubungi admin.' });
         }
@@ -453,7 +436,6 @@ async function switchRole(req, res, next) {
     user.activeRole = role;
     await user.save();
 
-    // Generate token dengan status provider terbaru
     const { accessToken, refreshToken } = generateTokens(user, providerStatus);
 
     setAuthCookies(res, accessToken, refreshToken);
@@ -476,7 +458,7 @@ async function switchRole(req, res, next) {
 }
 
 // ===================
-// REGISTER PARTNER (FIXED LOCATION STRUCTURE & SERVICES)
+// REGISTER PARTNER
 // ===================
 async function registerPartner(req, res, next) {
   try {
@@ -509,7 +491,7 @@ async function registerPartner(req, res, next) {
       nik, dateOfBirth, gender, domicileAddress,
       bankName, bankAccountNumber, bankAccountHolder,
       emergencyName, emergencyRelation, emergencyPhone,
-      selectedServices // [BARU] Input untuk layanan yang dipilih
+      selectedServices 
     } = req.body;
 
     const files = req.files || {};
@@ -518,19 +500,20 @@ async function registerPartner(req, res, next) {
         return res.status(400).json({ message: 'Dokumen KTP, Selfie KTP, dan SKCK wajib diunggah.' });
     }
 
+    // [UBAH LOGIKA S3] Mengambil URL absolut dari properti .location (bukan membuat path lokal)
     const docPaths = {
-        ktpUrl: files['ktp'] ? `/uploads/${files['ktp'][0].filename}` : '',
-        selfieKtpUrl: files['selfieKtp'] ? `/uploads/${files['selfieKtp'][0].filename}` : '',
-        skckUrl: files['skck'] ? `/uploads/${files['skck'][0].filename}` : '',
-        certificateUrl: files['certificate'] ? `/uploads/${files['certificate'][0].filename}` : ''
+        ktpUrl: files['ktp'] ? files['ktp'][0].location : '',
+        selfieKtpUrl: files['selfieKtp'] ? files['selfieKtp'][0].location : '',
+        skckUrl: files['skck'] ? files['skck'][0].location : '',
+        certificateUrl: files['certificate'] ? files['certificate'][0].location : ''
     };
 
-    // [FIX] Validasi Struktur Lokasi sesuai Schema Provider
+    // Struktur Lokasi
     let providerLocation = {
         type: 'Point',
-        coordinates: [0, 0], // Default di laut
+        coordinates: [0, 0],
         address: {
-            fullAddress: domicileAddress || '', // Simpan alamat teks di sini
+            fullAddress: domicileAddress || '',
             district: '',
             city: '',
             province: '',
@@ -539,28 +522,22 @@ async function registerPartner(req, res, next) {
     };
 
     if (user.location && user.location.coordinates && Array.isArray(user.location.coordinates)) {
-        // Salin koordinat user jika ada
         const [lng, lat] = user.location.coordinates;
         if (lng !== 0 || lat !== 0) {
             providerLocation.coordinates = [lng, lat];
         }
-        
-        // Opsional: Jika user punya detail alamat yang lebih lengkap, bisa dicopy
         if (!domicileAddress && user.address && user.address.detail) {
              providerLocation.address.fullAddress = user.address.detail;
         }
     }
 
-    // [BARU] Parsing & Validasi Selected Services
     let parsedServices = [];
     if (selectedServices) {
         try {
-            // FormData mengirim array/object sebagai JSON string
             parsedServices = typeof selectedServices === 'string' 
                 ? JSON.parse(selectedServices) 
                 : selectedServices;
             
-            // Validasi format: Harus array
             if (!Array.isArray(parsedServices)) throw new Error();
         } catch (e) {
             return res.status(400).json({ message: 'Format layanan yang dipilih tidak valid.' });
@@ -571,50 +548,39 @@ async function registerPartner(req, res, next) {
         userId,
         verificationStatus: 'pending',
         documents: docPaths,
-        
-        // Gunakan struktur lokasi yang sudah diperbaiki
         location: providerLocation,
-
         personalInfo: {
             nik: nik || '',
             dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
             gender: gender || 'Laki-laki'
         },
         domicileAddress: domicileAddress || '', 
-        
         bankAccount: {
             bankName: bankName || '',
             accountNumber: bankAccountNumber || '',
             accountHolderName: bankAccountHolder || ''
         },
-        
         emergencyContact: {
             name: emergencyName || '',
             relationship: emergencyRelation || '',
             phoneNumber: emergencyPhone || ''
         },
-
         details: {
             experienceYears: experienceYears || 0,
             description: description || '',
             serviceCategory: serviceCategory || '',
             vehicleType: vehicleType || ''
         },
-        
-        // [UPDATE] Simpan layanan yang dipilih user
-        // Menggunakan map untuk memastikan struktur sesuai providerServiceSchema
         services: parsedServices.map(s => ({
             serviceId: s.serviceId,
             price: Number(s.price),
             description: s.description || '',
             isActive: true
         })),
-
         rating: existingProvider ? existingProvider.rating : 0
     };
 
     if (existingProvider) {
-        // Jika provider rejected dan daftar ulang, update data yang ada
         await Provider.updateOne({ userId }, providerData);
     } else {
         await Provider.create(providerData);

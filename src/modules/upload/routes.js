@@ -1,20 +1,20 @@
-// src/modules/upload/routes.js
 const express = require('express');
 const router = express.Router();
-const upload = require('../../config/s3Upload');
+// [UBAH] Mengarah ke file konfigurasi S3 yang benar (3Upload.js)
+const uploadS3 = require('../../config/3Upload'); 
 const { uploadImage } = require('./controller');
+// [UBAH] Konsistensi import middleware auth (sama dengan modul auth)
+const authenticate = require('../../middlewares/auth');
 const requireDbConnection = require('../../middlewares/dbHealth');
-const { isAuthenticated, requireAdmin } = require('../../middlewares/auth');
 
 // Endpoint: POST /api/upload
-// Menggunakan middleware 'upload.single' untuk menangani satu file bernama 'image'
-// Menambahkan requireDbConnection (optional, tapi baik untuk konsistensi health check)
-// Menambahkan isAuthenticated agar tidak sembarang orang bisa upload (optional, sesuaikan kebutuhan)
-
+// Digunakan untuk upload gambar umum (selain profil/dokumen mitra)
+// Menggunakan 'image' sebagai key field form-data
 router.post(
   '/', 
-  isAuthenticated, // Hanya user login yang bisa upload (Keamanan)
-  upload.single('image'), 
+  requireDbConnection, // Cek kesehatan DB dulu
+  authenticate,        // Wajib login
+  uploadS3.single('image'), 
   uploadImage
 );
 
