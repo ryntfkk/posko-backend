@@ -21,38 +21,62 @@ const chatRoutes = require('./modules/chat/routes');
 const settingsRoutes = require('./modules/settings/routes');
 const voucherRoutes = require('./modules/vouchers/routes');
 const earningsRoutes = require('./modules/earnings/routes'); 
-const uploadRoutes = require('./modules/upload/routes'); // [BARU] Import route upload
+const uploadRoutes = require('./modules/upload/routes');
 const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
 
-// [FIXED] Konfigurasi CORS dengan multiple origins yang aman
+// [UPDATED] Konfigurasi CORS yang lebih informatif untuk debugging
 const corsOptions = {
   origin: function (origin, callback) {
-    const allowedOrigins = env.corsOrigins;
+    const allowedOrigins = env.corsOrigins || [];
     
-    // Allow requests with no origin (like mobile apps or curl requests)
+    // Allow requests with no origin (like mobile apps, curl requests, or server-to-server)
     if (!origin) return callback(null, true);
     
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
+      // Log peringatan tapi jangan crash, membantu debug jika frontend deploy URL berubah
       console.warn(`⚠️ CORS blocked request from origin: ${origin}`);
-      callback(new Error('Not allowed by CORS policy'));
+      callback(new Error(`Not allowed by CORS policy: ${origin}`));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
   optionsSuccessStatus: 200
 };
 
-app.use(cors(corsOptions));
+// Middleware: Logger untuk setiap request (PENTING untuk debug 502)
+// Ini akan mencatat setiap request yang berhasil masuk ke server EC2
+app.use((req, res, next) => {
+  const start = Date.now();
+  const { method, url } = req;
+  
+  // Event listener saat response selesai dikirim
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    const status = res.statusCode;
+    
+    // Log format: [WAKTU] METHOD URL STATUS - DURASI
+    console.log(`[${new Date().toISOString()}] ${method} ${url} ${status} - ${duration}ms`);
+    
+    // Jika status 500 ke atas, beri highlight warning
+    if (status >= 500) {
+      console.error(`❌ Server Error on ${method} ${url}`);
+    }
+  });
+  
+  next();
+});
 
+app.use(cors(corsOptions));
 app.use(i18nMiddleware);
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // Tambahan untuk parsing form data standar
 
-// Health Check
+// Health Check Root (Tanpa DB check agar Load Balancer bisa ping cepat)
 app.get('/', (req, res) => {
   res.status(200).send('Posko Backend is Running on EC2! ');
 });
@@ -80,14 +104,25 @@ app.use('/api/services', requireDbConnection, serviceRoutes);
 app.use('/api/settings', requireDbConnection, settingsRoutes);
 app.use('/api/vouchers', requireDbConnection, voucherRoutes);
 app.use('/api/earnings', requireDbConnection, earningsRoutes); 
-app.use('/api/upload', requireDbConnection, uploadRoutes); // [PENTING] Endpoint upload didaftarkan di sini
+app.use('/api/upload', requireDbConnection, uploadRoutes);
 
+// Global Error Handler
 app.use(errorHandler);
+
+// Global Uncaught Exception Handler (Mencegah server mati mendadak)
+process.on('uncaughtException', (err) => {
+  console.error('🔥 UNCAUGHT EXCEPTION! Server tetap berjalan, tapi periksa ini:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('🔥 UNHANDLED REJECTION! Server tetap berjalan, tapi periksa ini:', reason);
+});
 
 // --- DATABASE CONNECTION ---
 // Initialize database connection at startup
 connectDB().catch((err) => {
   console.error('❌ Initial database connection failed:', err.message);
+  // Jangan process.exit(1) di sini agar server HTTP tetap bisa jalan untuk health check log
 });
 
 // --- EKSPOR APLIKASI ---
@@ -97,13 +132,13 @@ module.exports = app;
 // Kode ini akan dieksekusi saat dijalankan dengan `node src/index.js` atau PM2
 if (require.main === module) {
   const server = http.createServer(app);
-  const PORT = process.env.PORT || 4000;
+  const PORT = process.env.PORT || 4000; // Pastikan port ini terbuka di Security Group AWS
   
   // Inisialisasi Socket.io
   initSocket(server);
 
-  server.listen(PORT, () => {
+  server.listen(PORT, '0.0.0.0', () => { // Bind ke 0.0.0.0 agar bisa diakses publik (penting untuk EC2)
     console.log(`🚀 Server berjalan di port ${PORT}`);
-    console.log(`✅ CORS Origins diizinkan: ${env.corsOrigins ? env.corsOrigins.join(', ') : 'All'}`);
+    console.log(`📡 Menunggu request dari origins: ${env.corsOrigins ? env.corsOrigins.join(', ') : 'All'}`);
   });
 }
