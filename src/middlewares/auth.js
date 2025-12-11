@@ -8,7 +8,7 @@ function unauthorizedResponse(req, res, messageKey, defaultMessage, status = 401
   });
 }
 
-// 1. Ini fungsi utamanya (dulu namanya authenticate)
+// 1. Fungsi Utama (Dulu namanya authenticate)
 function authenticate(req, res, next) {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
@@ -26,7 +26,7 @@ function authenticate(req, res, next) {
   }
 }
 
-// 2. Ini fungsi tambahannya
+// 2. Fungsi Tambahan (Admin Check)
 function requireAdmin(req, res, next) {
   if (!req.user || req.user.role !== 'admin') {
     return unauthorizedResponse(req, res, 'auth.forbidden', 'Admin access required', 403);
@@ -34,13 +34,14 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// --- BAGIAN PENTING (HYBRID EXPORT) ---
+// --- HYBRID EXPORT MAGIC ---
 
-// A. Export default adalah fungsi 'authenticate' agar KODE LAMA (Services, Orders, dll) TIDAK ERROR.
+// A. Default Export: Agar kode lama (const authenticate = require(...)) tetap jalan!
 module.exports = authenticate;
 
-// B. Kita tempelkan 'requireAdmin' ke fungsi tersebut agar bisa dipakai jika butuh.
-module.exports.requireAdmin = requireAdmin;
-
-// C. Kita juga tempelkan dirinya sendiri dengan nama 'isAuthenticated' untuk kompatibilitas kode baru
+// B. Named Properties: Agar kode baru (const { isAuthenticated } = require(...)) juga jalan!
+// Kita tempelkan fungsi 'authenticate' ke properti 'isAuthenticated'
 module.exports.isAuthenticated = authenticate;
+
+// C. Kita tempelkan juga 'requireAdmin'
+module.exports.requireAdmin = requireAdmin;
