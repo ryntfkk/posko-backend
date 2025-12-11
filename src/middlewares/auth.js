@@ -8,7 +8,7 @@ function unauthorizedResponse(req, res, messageKey, defaultMessage, status = 401
   });
 }
 
-function authenticate(req, res, next) {
+function isAuthenticated(req, res, next) {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
 
@@ -25,4 +25,14 @@ function authenticate(req, res, next) {
   }
 }
 
-module.exports = authenticate;
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'admin') {
+    return unauthorizedResponse(req, res, 'auth.forbidden', 'Admin access required', 403);
+  }
+  next();
+}
+
+module.exports = {
+  isAuthenticated,
+  requireAdmin
+};

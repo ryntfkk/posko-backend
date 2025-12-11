@@ -3,7 +3,7 @@ const express = require('express');
 const controller = require('./controller');
 const authenticate = require('../../middlewares/auth');
 // [UBAH] Gunakan config S3
-const uploadS3 = require('../../config/3Upload'); 
+const uploadS3 = require('../../config/s3Upload'); 
 
 const router = express.Router();
 
