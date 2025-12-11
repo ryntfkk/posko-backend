@@ -1,3 +1,4 @@
+// src/index.js
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
@@ -22,7 +23,7 @@ const settingsRoutes = require('./modules/settings/routes');
 const voucherRoutes = require('./modules/vouchers/routes');
 const earningsRoutes = require('./modules/earnings/routes'); 
 const uploadRoutes = require('./modules/upload/routes');
-// [BARU] Import Region Routes
+// [BARU] Import Region Routes (Ini yang sebelumnya hilang)
 const regionRoutes = require('./modules/regions/routes');
 const errorHandler = require('./middlewares/errorHandler');
 
@@ -107,7 +108,7 @@ app.use('/api/settings', requireDbConnection, settingsRoutes);
 app.use('/api/vouchers', requireDbConnection, voucherRoutes);
 app.use('/api/earnings', requireDbConnection, earningsRoutes); 
 app.use('/api/upload', requireDbConnection, uploadRoutes);
-// [BARU] Daftarkan Region Route
+// [BARU] Daftarkan Region Route (Ini Wajib Ada!)
 app.use('/api/regions', requireDbConnection, regionRoutes);
 
 // Global Error Handler
