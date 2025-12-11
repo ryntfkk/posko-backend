@@ -22,6 +22,8 @@ const settingsRoutes = require('./modules/settings/routes');
 const voucherRoutes = require('./modules/vouchers/routes');
 const earningsRoutes = require('./modules/earnings/routes'); 
 const uploadRoutes = require('./modules/upload/routes');
+// [BARU] Import Region Routes
+const regionRoutes = require('./modules/regions/routes');
 const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
@@ -105,6 +107,8 @@ app.use('/api/settings', requireDbConnection, settingsRoutes);
 app.use('/api/vouchers', requireDbConnection, voucherRoutes);
 app.use('/api/earnings', requireDbConnection, earningsRoutes); 
 app.use('/api/upload', requireDbConnection, uploadRoutes);
+// [BARU] Daftarkan Region Route
+app.use('/api/regions', requireDbConnection, regionRoutes);
 
 // Global Error Handler
 app.use(errorHandler);
