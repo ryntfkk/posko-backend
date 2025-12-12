@@ -5,7 +5,7 @@ const { validateCreateOrder } = require('./validators');
 const authenticate = require('../../middlewares/auth');
 
 // [UPDATE] Menggunakan Config S3 yang sudah ada, bukan Local Storage
-const uploadS3 = require('../../config/3Upload');
+const uploadS3 = require('../../config/s3Upload');
 
 const router = express.Router();
 
