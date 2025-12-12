@@ -4,24 +4,35 @@ const OrderService = require('./service');
 // 1. LIST ALL ORDERS
 async function listOrders(req, res, next) {
   try {
-    // [FIX] Destructure result dari Service (data & meta)
     const { data, meta } = await OrderService.listOrders(req.user, req.query);
     
     const messageKey = 'orders.list';
     res.json({ 
       messageKey, 
       message: req.t ? req.t(messageKey) : 'List Orders', 
-      data: data, // Kirim array data murni
-      meta: meta  // Kirim metadata pagination
+      data: data, 
+      meta: meta 
     });
   } catch (error) {
     next(error);
   }
 }
 
-// 2. CREATE ORDER
+// 2. CREATE ORDER (Updated for S3 Attachments)
 async function createOrder(req, res, next) {
   try {
+    // [UPDATE] Cek apakah ada file attachments dari S3
+    if (req.files && req.files.length > 0) {
+      // Mapping file S3 ke format attachments database
+      const attachments = req.files.map(file => ({
+        url: file.location, // URL publik S3 (multer-s3 menggunakan properti .location)
+        type: 'image'
+      }));
+      
+      // Masukkan ke req.body agar Service menyimpannya
+      req.body.attachments = attachments;
+    }
+
     const order = await OrderService.createOrder(req.user, req.body);
     
     res.status(201).json({ 
@@ -53,7 +64,7 @@ async function listIncomingOrders(req, res, next) {
     
     res.json({ 
       message: 'Daftar order masuk berhasil diambil',
-      ...result // providerStatus & data
+      ...result 
     });
   } catch (error) {
     next(error);
@@ -70,7 +81,7 @@ async function acceptOrder(req, res, next) {
   }
 }
 
-// 6. UPDATE ORDER STATUS (Completed/Working/etc)
+// 6. UPDATE ORDER STATUS
 async function updateOrderStatus(req, res, next) {
   try {
     const result = await OrderService.updateOrderStatus(
@@ -78,8 +89,6 @@ async function updateOrderStatus(req, res, next) {
       req.params.orderId, 
       req.body.status
     );
-    
-    // Service sudah mengembalikan object { message, data } yang sesuai
     res.json(result);
   } catch (error) {
     next(error);
@@ -104,7 +113,7 @@ async function requestAdditionalFee(req, res, next) {
   }
 }
 
-// [BARU] 7b. VOID ADDITIONAL FEE
+// 7b. VOID ADDITIONAL FEE
 async function voidAdditionalFee(req, res, next) {
   try {
     const order = await OrderService.voidAdditionalFee(
@@ -122,13 +131,20 @@ async function voidAdditionalFee(req, res, next) {
   }
 }
 
-// 8. UPLOAD COMPLETION EVIDENCE
+// 8. UPLOAD COMPLETION EVIDENCE (Updated for S3)
 async function uploadCompletionEvidence(req, res, next) {
   try {
+    // Pastikan file ada
+    if (!req.file) {
+      throw new Error('File gambar tidak ditemukan.');
+    }
+
+    // [UPDATE] Service harus menerima object file atau URL. 
+    // Karena req.file dari multer-s3 memiliki .location (URL), kita pastikan Service bisa menggunakannya.
     const order = await OrderService.uploadCompletionEvidence(
       req.user, 
       req.params.orderId, 
-      req.file, 
+      req.file, // Service akan membaca req.file.location
       req.body.description
     );
 
@@ -156,7 +172,7 @@ async function rejectAdditionalFee(req, res, next) {
   }
 }
 
-// 10. AUTO COMPLETE STUCK ORDERS (CRON JOB)
+// 10. AUTO COMPLETE STUCK ORDERS
 async function autoCompleteStuckOrders(req, res, next) {
   try {
     const result = await OrderService.autoCompleteStuckOrders(req.headers['x-cron-secret']);
@@ -188,7 +204,7 @@ module.exports = {
   acceptOrder,
   updateOrderStatus,
   requestAdditionalFee, 
-  voidAdditionalFee, // Export baru
+  voidAdditionalFee,
   uploadCompletionEvidence,
   rejectAdditionalFee,
   autoCompleteStuckOrders,
