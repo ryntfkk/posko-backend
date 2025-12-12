@@ -7,10 +7,13 @@ const env = require('../../config/env');
 let io;
 
 function initSocket(httpServer) {
+  // [UPDATED] Menggunakan env.corsOrigins daripada wildcard "*"
+  // Ini memperbaiki error CORS saat withCredentials: true diaktifkan di frontend
   io = new Server(httpServer, {
     cors: {
-      origin: "*", // Sesuaikan dengan URL frontend Anda di production
-      methods: ["GET", "POST"]
+      origin: env.corsOrigins, // Mengambil array origin yang diizinkan dari env.js
+      methods: ["GET", "POST"],
+      credentials: true // Wajib true agar sesuai dengan setting frontend
     }
   });
 
