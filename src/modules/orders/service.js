@@ -67,6 +67,8 @@ class OrderService {
   }
 
   async getProviderActiveOrderCount(providerId) {
+    // [UPDATE] Hanya status fisik bekerja yang dianggap "Active/Busy"
+    // 'paid' (Direct Order baru) TIDAK masuk sini.
     const activeStatuses = ['accepted', 'on_the_way', 'working'];
     return await Order.countDocuments({
       providerId: providerId,
@@ -301,6 +303,8 @@ class OrderService {
         discountAmount: Math.floor(discountAmount),
         voucherId,
         orderType,
+        // [UPDATE] Explicitly set status awal
+        status: orderType === 'direct' ? 'paid' : 'searching',
         scheduledAt,
         shippingAddress,
         location,
@@ -711,12 +715,16 @@ class OrderService {
     }
   }
 
+  // [UPDATE] REVISI LOGIKA LIST INCOMING ORDERS
   async listIncomingOrders(user) {
     const provider = await Provider.findOne({ userId: user.userId }).lean();
     if (!provider) throw new Error('Anda belum terdaftar sebagai Mitra.');
 
+    // 1. Cek Apakah Mitra Sibuk (Active Statuses only)
     const activeOrderCount = await this.getProviderActiveOrderCount(provider._id);
 
+    // 2. Fetch Direct Orders (Order Tembak) - Status 'paid' (Belum diterima)
+    // Direct order 'paid' TIDAK menghitung activeOrderCount, jadi mitra tidak dianggap busy.
     const directOrdersPromise = Order.find({
       providerId: provider._id,
       status: 'paid'
@@ -727,7 +735,10 @@ class OrderService {
 
     let basicOrdersPromise = Promise.resolve([]);
 
+    // 3. Logic Fetch Basic Orders (Marketplace)
+    // Jika tidak ada job aktif ('accepted', 'working', etc), dan provider verified
     if (activeOrderCount === 0 && provider.verificationStatus === 'verified') {
+      
       const myServiceIds = provider.services
         .filter(s => s.isActive)
         .map(s => s.serviceId.toString());
@@ -735,7 +746,7 @@ class OrderService {
       let basicQuery = {
         orderType: 'basic',
         status: 'searching',
-        providerId: null,
+        providerId: null, // Order yang belum diambil siapa-siapa
         'items.serviceId': { $in: myServiceIds },
         rejectedByProviders: { $ne: provider._id } // [UPDATED] Exclude rejected orders
       };
@@ -768,13 +779,16 @@ class OrderService {
     const [directOrders, basicOrders] = await Promise.all([directOrdersPromise, basicOrdersPromise]);
 
     const combinedOrders = [...directOrders, ...basicOrders].sort((a, b) => {
+      // Prioritaskan Direct Order di atas
+      if (a.orderType === 'direct' && b.orderType !== 'direct') return -1;
+      if (a.orderType !== 'direct' && b.orderType === 'direct') return 1;
       return new Date(a.scheduledAt) - new Date(b.scheduledAt);
     });
 
     return {
       providerStatus: {
         activeOrderCount,
-        isBusy: activeOrderCount > 0,
+        isBusy: activeOrderCount > 0, // Direct 'paid' order does NOT make provider busy
         verificationStatus: provider.verificationStatus
       },
       data: combinedOrders
@@ -826,7 +840,7 @@ class OrderService {
     return updatedOrder;
   }
 
-  // REJECT ORDER
+  // [BARU] REJECT ORDER
   async rejectOrder(user, orderId) {
     const provider = await Provider.findOne({ userId: user.userId });
     if (!provider) throw new Error('Provider not found');
@@ -998,7 +1012,7 @@ class OrderService {
     return order;
   }
 
-  // VOID ADDITIONAL FEE (PROVIDER CANCEL REQUEST)
+  // [BARU] 7b. VOID ADDITIONAL FEE
   async voidAdditionalFee(user, orderId, feeId) {
     const provider = await Provider.findOne({ userId: user.userId });
     if (!provider) throw new Error('Unauthorized provider');
@@ -1024,6 +1038,7 @@ class OrderService {
     return order;
   }
 
+  // 8. UPLOAD COMPLETION EVIDENCE
   async uploadCompletionEvidence(user, orderId, file, description) {
     if (!file) throw new Error('File gambar wajib diupload.');
     
@@ -1036,9 +1051,8 @@ class OrderService {
     }
     if (order.status !== 'working') throw new Error('Hanya bisa diupload saat status "working".');
 
-    // [MODIFIKASI S3] Gunakan file.location dari Multer S3
     order.completionEvidence.push({
-      url: file.location,
+      url: `/uploads/${file.filename}`,
       type: 'photo',
       description: description || 'Bukti penyelesaian pekerjaan',
       uploadedAt: new Date()
@@ -1047,6 +1061,7 @@ class OrderService {
     return order;
   }
 
+  // 9. REJECT ADDITIONAL FEE
   async rejectAdditionalFee(user, orderId, feeId) {
     const order = await Order.findById(orderId);
     if (!order) throw new Error('Order not found');
@@ -1061,6 +1076,7 @@ class OrderService {
     return order;
   }
 
+  // 10. AUTO COMPLETE STUCK ORDERS (CRON JOB)
   async autoCompleteStuckOrders(cronSecret) {
     if (cronSecret !== env.cronSecret) throw new Error('Forbidden: Invalid Cron Secret');
 
