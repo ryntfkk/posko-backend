@@ -303,8 +303,8 @@ class OrderService {
         discountAmount: Math.floor(discountAmount),
         voucherId,
         orderType,
-        // [UPDATE] Explicitly set status awal
-        status: orderType === 'direct' ? 'paid' : 'searching',
+        // [FIX] Status harus 'pending' agar bisa dibayar via PaymentController
+        status: 'pending',
         scheduledAt,
         shippingAddress,
         location,
@@ -324,7 +324,8 @@ class OrderService {
       await session.commitTransaction();
       
       createdOrder = order;
-      shouldBroadcastBasic = orderType === 'basic';
+      // [FIX] Hapus broadcast di sini. Notifikasi akan dipicu via Webhook setelah pembayaran sukses.
+      shouldBroadcastBasic = false;
 
     } catch (error) {
       if (session.inTransaction()) {
@@ -335,13 +336,47 @@ class OrderService {
       session.endSession();
     }
 
-    // --- SIDE EFFECTS (NOTIFICATIONS) ---
-    this._handleOrderNotifications(createdOrder, providerUserIdToNotify, shouldBroadcastBasic);
+    // [FIX] Tidak memanggil _handleOrderNotifications di sini
+    // this._handleOrderNotifications(createdOrder, providerUserIdToNotify, shouldBroadcastBasic);
 
     return createdOrder;
   }
 
-  // Helper untuk Notification (Side Effect)
+  // [BARU] Fungsi ini dipanggil oleh PaymentController.handleNotification setelah status -> PAID
+  async triggerPostPaymentNotifications(orderId) {
+    try {
+      const order = await Order.findById(orderId)
+        .populate({
+          path: 'providerId',
+          populate: { path: 'userId', select: '_id' } 
+        });
+
+      if (!order) return;
+
+      const io = getIO();
+      if (!io) return;
+
+      // 1. Notifikasi untuk Direct Order (Ke Provider Tertentu)
+      if (order.orderType === 'direct' && order.providerId && order.providerId.userId) {
+        const providerUserId = order.providerId.userId._id.toString();
+        io.to(providerUserId).emit('order_new', {
+          message: 'Anda menerima pesanan baru! (Sudah Dibayar)',
+          order: order.toObject()
+        });
+        console.log(`[NOTIF] Sent direct order notif to ${providerUserId}`);
+      }
+
+      // 2. Notifikasi untuk Basic Order (Broadcast ke Sekitar)
+      if (order.orderType === 'basic') {
+        await this.broadcastBasicOrderToNearbyProviders(order);
+      }
+
+    } catch (error) {
+      console.error('[POST-PAYMENT NOTIF ERROR]', error);
+    }
+  }
+
+  // Helper untuk Notification (Side Effect - Legacy / Internal use)
   async _handleOrderNotifications(order, providerUserId, shouldBroadcast) {
     if (!order) return;
     try {
@@ -715,7 +750,7 @@ class OrderService {
     }
   }
 
-  // [UPDATE] REVISI LOGIKA LIST INCOMING ORDERS
+  // [UPDATED] LIST INCOMING ORDERS
   async listIncomingOrders(user) {
     const provider = await Provider.findOne({ userId: user.userId }).lean();
     if (!provider) throw new Error('Anda belum terdaftar sebagai Mitra.');
@@ -745,10 +780,10 @@ class OrderService {
 
       let basicQuery = {
         orderType: 'basic',
-        status: 'searching',
-        providerId: null, // Order yang belum diambil siapa-siapa
+        status: 'searching', // Webhook will set 'pending' -> 'searching' after payment
+        providerId: null, 
         'items.serviceId': { $in: myServiceIds },
-        rejectedByProviders: { $ne: provider._id } // [UPDATED] Exclude rejected orders
+        rejectedByProviders: { $ne: provider._id } 
       };
 
       if (

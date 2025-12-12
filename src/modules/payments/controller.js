@@ -8,6 +8,8 @@ const { checkMidtransConfig } = require('../../utils/midtransConfig');
 const env = require('../../config/env');
 const UserVoucher = require('../vouchers/userVoucherModel');
 const Voucher = require('../vouchers/model');
+// [PERBAIKAN] Import OrderService agar bisa memanggil notifikasi setelah bayar
+const OrderService = require('../orders/service');
 
 async function listPayments(req, res, next) {
   try {
@@ -70,6 +72,7 @@ async function createPayment(req, res, next) {
     let feeIdsToPay = []; // ID dari fee yang akan dibayar
 
     // KONDISI 1: Pembayaran Awal (Order Utama)
+    // [FIX] Status 'pending' sekarang valid karena OrderService membuatnya pending
     if (order.status === 'pending') {
         transactionType = 'initial';
         grossAmount = order.totalAmount;
@@ -161,10 +164,6 @@ async function createPayment(req, res, next) {
     });
     await payment.save();
 
-    // Jika ini adalah pembayaran add-on, update status fee jadi 'approved_unpaid' dulu?
-    // Atau biarkan 'pending_approval' sampai dibayar lunas?
-    // Sebaiknya biarkan 'pending_approval' agar customer masih bisa reject jika berubah pikiran sebelum bayar.
-
     res.status(201).json({
       message: 'Payment Token Generated',
       data: {
@@ -220,7 +219,6 @@ async function handleNotification(req, res, next) {
     const notifAmount = parseFloat(gross_amount);
     
     // [FIX] Cari Payment pending yang sesuai dengan orderId dan amount
-    // Ini membantu membedakan payment initial vs add-on jika nominalnya beda
     const payment = await Payment.findOne({
         orderId: realOrderId,
         amount: notifAmount,
@@ -264,24 +262,27 @@ async function handleNotification(req, res, next) {
         payment.status = 'paid';
         await payment.save();
         
+        let shouldTriggerNotif = false; // Flag untuk notifikasi
+
         // B. Update Order / Additional Fees based on Transaction Type
         if (payment.transactionType === 'initial') {
              // Logic Pembayaran Utama
              if (order.status === 'pending') {
+                 // [FIX] Update status dari 'pending' ke status aktif yang benar
                  const nextStatus = order.orderType === 'direct' ? 'paid' : 'searching';
+                 
                  await Order.findByIdAndUpdate(realOrderId, { status: nextStatus });
                  console.log(`✅ Order ${realOrderId} updated to ${nextStatus}`);
+                 
+                 shouldTriggerNotif = true; // Notif: Order baru aktif
              }
         } 
         else if (payment.transactionType === 'additional_fee') {
              // Logic Pembayaran Add-on
-             // Ambil ID fee dari payment record
              const feeIds = payment.feeId ? payment.feeId.split(',') : [];
-             
              let updatedFees = false;
              
              if (feeIds.length > 0) {
-                 // Update spesifik fee berdasarkan ID yang disimpan
                  order.additionalFees.forEach(fee => {
                      if (feeIds.includes(fee._id.toString()) && fee.status === 'pending_approval') {
                          fee.status = 'paid';
@@ -290,7 +291,7 @@ async function handleNotification(req, res, next) {
                      }
                  });
              } else {
-                 // Fallback logic lama (match by status) jika feeId kosong (legacy data)
+                 // Fallback
                  order.additionalFees.forEach(fee => {
                      if (fee.status === 'pending_approval') {
                          fee.status = 'paid';
@@ -303,9 +304,15 @@ async function handleNotification(req, res, next) {
              if (updatedFees) {
                  await order.save(); 
                  console.log(`✅ Additional fees for order ${realOrderId} marked as paid.`);
-             } else {
-                 console.warn(`⚠️ Payment received for add-on but no matching pending fees found.`);
+                 // Notif: Fee dibayar (Opsional, tapi bagus untuk UX)
+                 // shouldTriggerNotif = true; 
              }
+        }
+
+        // [BARU] Panggil fungsi notifikasi OrderService
+        if (shouldTriggerNotif) {
+            OrderService.triggerPostPaymentNotifications(realOrderId)
+               .catch(err => console.error('Failed to trigger notifications:', err));
         }
 
     } 
@@ -341,6 +348,7 @@ async function handleNotification(req, res, next) {
     res.status(500).json({ message: 'Internal Server Error' }); 
   }
 }
+
 // [PERBAIKAN] Tambahkan fungsi ini untuk Admin
 async function listAllPayments(req, res, next) {
   try {
@@ -362,4 +370,5 @@ async function listAllPayments(req, res, next) {
     next(error);
   }
 }
+
 module.exports = { listPayments, createPayment, handleNotification, listAllPayments };
