@@ -4,12 +4,38 @@ const controller = require('./controller');
 const { validateCreateOrder } = require('./validators');
 const authenticate = require('../../middlewares/auth');
 
-// [UPDATE] Menggunakan Config S3 yang sudah ada, bukan Local Storage
+// Menggunakan konfigurasi S3 Upload
 const uploadS3 = require('../../config/s3Upload');
 
 const router = express.Router();
 
-// [BARU] Public/Internal Route untuk Cron Job
+// Middleware Helper: Parse JSON string dari Multipart Form Data
+// Ini diperlukan karena saat upload file, data object (seperti items/address) dikirim sebagai string JSON
+const parseMultipartBody = (req, res, next) => {
+    // List field yang dikirim sebagai JSON string oleh Frontend
+    const jsonFields = [
+        'items', 
+        'shippingAddress', 
+        'location', 
+        'customerContact', 
+        'propertyDetails', 
+        'scheduledTimeSlot'
+    ];
+
+    jsonFields.forEach(field => {
+        if (req.body[field] && typeof req.body[field] === 'string') {
+            try {
+                req.body[field] = JSON.parse(req.body[field]);
+            } catch (e) {
+                console.error(`Gagal parsing field ${field}:`, e);
+                // Biarkan error handle oleh validator jika format salah
+            }
+        }
+    });
+
+    next();
+};
+
 router.post('/auto-complete', controller.autoCompleteStuckOrders);
 
 router.use(authenticate);
@@ -19,24 +45,22 @@ router.patch('/:orderId/accept', controller.acceptOrder);
 router.patch('/:orderId/reject', controller.rejectOrder);
 router.patch('/:orderId/status', controller.updateOrderStatus);
 
-// [BARU] Endpoint Request Biaya Tambahan
 router.post('/:orderId/additional-fee', controller.requestAdditionalFee);
-
-// [BARU] Endpoint Void Biaya Tambahan (Provider Cancel Request)
 router.delete('/:orderId/fees/:feeId', controller.voidAdditionalFee);
-
-// [BARU] Endpoint Reject Biaya Tambahan (Sesuai Frontend)
 router.put('/:orderId/fees/:feeId/reject', controller.rejectAdditionalFee);
 
-// [UPDATE] Upload Bukti Pekerjaan (Completion Evidence) menggunakan S3
-// Menggunakan 'image' sebagai field name sesuai frontend provider
+// Upload Bukti Pekerjaan
 router.post('/:orderId/completion-evidence', uploadS3.single('image'), controller.uploadCompletionEvidence);
 
 router.get('/', controller.listOrders);
 router.get('/:orderId', controller.getOrderById); 
 
-// [UPDATE] Create Order sekarang mendukung upload foto kondisi awal (attachments)
-// Menggunakan 'attachments' sebagai field name, max 5 foto
-router.post('/', uploadS3.array('attachments', 5), validateCreateOrder, controller.createOrder);
+// Create Order dengan attachments (kondisi awal) + Parsing JSON + Validasi
+router.post('/', 
+    uploadS3.array('attachments', 5), 
+    parseMultipartBody, // [PENTING] Parse JSON string sebelum validasi
+    validateCreateOrder, 
+    controller.createOrder
+);
 
 module.exports = router;
