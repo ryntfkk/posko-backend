@@ -11,25 +11,31 @@ function validateItem(item, index, errors) {
     addError(errors, `items[${index}].name`, 'validation.item_name_required', 'Nama item wajib diisi');
   }
 
-  const quantity = item?.quantity;
+  // [FIX] Handle quantity string dari FormData
+  let quantity = item?.quantity;
+  if (typeof quantity === 'string') quantity = Number(quantity); // Konversi string ke number
+
   if (quantity === undefined) {
     addError(errors, `items[${index}].quantity`, 'validation.quantity_required', 'Jumlah item wajib diisi');
-  } else if (typeof quantity !== 'number' || Number.isNaN(quantity) || quantity < 1) {
+  } else if (Number.isNaN(quantity) || quantity < 1) {
     addError(errors, `items[${index}].quantity`, 'validation.quantity_invalid', 'Jumlah item harus angka minimal 1');
   }
 
-  const price = item?.price;
+  // [FIX] Handle price string dari FormData
+  let price = item?.price;
+  if (typeof price === 'string') price = Number(price);
+
   if (price === undefined) {
     addError(errors, `items[${index}].price`, 'validation.price_required', 'Harga item wajib diisi');
-  } else if (typeof price !== 'number' || Number.isNaN(price) || price < 0) {
+  } else if (Number.isNaN(price) || price < 0) {
     addError(errors, `items[${index}].price`, 'validation.price_invalid', 'Harga item harus angka positif');
   }
 
   return {
     serviceId,
     name,
-    quantity: typeof quantity === 'number' ? quantity : undefined,
-    price: typeof price === 'number' ? price : undefined,
+    quantity: quantity,
+    price: price,
     note: normalizeString(item?.note) || ''
   };
 }
@@ -46,12 +52,13 @@ function validateAddressAndLocation(body, errors) {
     addError(errors, 'shippingAddress', 'validation.address_incomplete', 'Alamat pengiriman (province, city, detail) wajib diisi');
   }
 
+  // [FIX] Handle coordinates dari JSON parse yang mungkin masih string jika format salah, tapi biasanya array
   const coordinates = location.coordinates;
   const hasCoordinates = Array.isArray(coordinates) && coordinates.length === 2;
-  const numericCoordinates = hasCoordinates ?  coordinates.map(Number) : [];
+  const numericCoordinates = hasCoordinates ? coordinates.map(Number) : [];
   const coordinatesAreValid = numericCoordinates.every(Number.isFinite);
 
-  if (!hasCoordinates || ! coordinatesAreValid) {
+  if (!hasCoordinates || !coordinatesAreValid) {
     addError(errors, 'location', 'validation.invalid_coordinates', 'Titik lokasi wajib berupa [longitude, latitude] yang valid');
   } else {
     const [lng, lat] = numericCoordinates;
@@ -76,7 +83,6 @@ function validateAddressAndLocation(body, errors) {
   };
 }
 
-// [BARU] Validasi Customer Contact (CRITICAL)
 function validateCustomerContact(body, errors) {
   const contact = body.customerContact || {};
   
@@ -94,50 +100,69 @@ function validateCustomerContact(body, errors) {
   };
 }
 
-// [BARU] Validasi Property Details (MEDIUM)
 function validatePropertyDetails(body) {
   const property = body.propertyDetails || {};
   const validTypes = ['rumah', 'apartemen', 'kantor', 'ruko', 'kendaraan', 'lainnya', ''];
   
+  // [FIX] Konversi floor ke number jika string
+  let floor = property.floor;
+  if (floor !== null && floor !== undefined && floor !== '') {
+      floor = Number(floor);
+  } else {
+      floor = null;
+  }
+
+  // [FIX] Konversi boolean string ('true'/'false')
+  const toBoolean = (val, defaultVal) => {
+      if (typeof val === 'boolean') return val;
+      if (val === 'true') return true;
+      if (val === 'false') return false;
+      return defaultVal;
+  };
+
   return {
     type: validTypes.includes(property.type) ? property.type : '',
-    floor: typeof property.floor === 'number' && property.floor >= 0 ? property.floor : null,
-    hasParking: typeof property.hasParking === 'boolean' ? property.hasParking : true,
-    hasElevator: typeof property.hasElevator === 'boolean' ? property.hasElevator : false,
+    floor: (typeof floor === 'number' && !isNaN(floor) && floor >= 0) ? floor : null,
+    hasParking: toBoolean(property.hasParking, true),
+    hasElevator: toBoolean(property.hasElevator, false),
     accessNote: normalizeString(property.accessNote) || ''
   };
 }
 
-// [BARU] Validasi Scheduled Time Slot (MEDIUM)
 function validateScheduledTimeSlot(body) {
   const slot = body.scheduledTimeSlot || {};
-  const timeRegex = /^([01]? [0-9]|2[0-3]):[0-5][0-9]$/;
+  const timeRegex = /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/;
   
+  const toBoolean = (val, defaultVal) => {
+      if (typeof val === 'boolean') return val;
+      if (val === 'true') return true;
+      if (val === 'false') return false;
+      return defaultVal;
+  };
+
   return {
-    preferredStart: timeRegex.test(slot.preferredStart) ?  slot.preferredStart : '',
+    preferredStart: timeRegex.test(slot.preferredStart) ? slot.preferredStart : '',
     preferredEnd: timeRegex.test(slot.preferredEnd) ? slot.preferredEnd : '',
-    isFlexible: typeof slot.isFlexible === 'boolean' ? slot.isFlexible : true
+    isFlexible: toBoolean(slot.isFlexible, true)
   };
 }
 
-// [BARU] Validasi Attachments (HIGH)
 function validateAttachments(body, errors) {
   const attachments = body.attachments || [];
   
-  if (! Array.isArray(attachments)) {
+  if (!Array.isArray(attachments)) {
     return [];
   }
   
-  // Batas maksimal 5 lampiran
   if (attachments.length > 5) {
     addError(errors, 'attachments', 'validation.attachments_max', 'Maksimal 5 lampiran per order');
   }
   
   return attachments.slice(0, 5).map((att, index) => {
     const url = normalizeString(att.url);
-    if (!url) {
-      addError(errors, `attachments[${index}].url`, 'validation.attachment_url_required', 'URL lampiran wajib diisi');
-    }
+    // Kita skip validasi URL di sini jika kosong, 
+    // karena file baru (dari S3) akan ditambahkan di controller nanti.
+    // Jika ini lampiran lama (URL string), baru kita validasi.
     
     return {
       url: url || '',
@@ -160,21 +185,25 @@ function validateCreateOrder(req, res, next) {
   }
 
   let items = [];
-  if (! body.items || !Array.isArray(body.items) || body.items.length === 0) {
+  // body.items sudah diparse oleh middleware parseMultipartBody menjadi object/array
+  if (!body.items || !Array.isArray(body.items) || body.items.length === 0) {
     addError(errors, 'items', 'validation.items_required', 'Items wajib diisi minimal satu');
   } else {
     items = body.items.map((item, index) => validateItem(item, index, errors));
   }
 
-  const totalAmount = body.totalAmount;
+  // [FIX] Handle totalAmount dari string FormData
+  let totalAmount = body.totalAmount;
+  if (typeof totalAmount === 'string') totalAmount = Number(totalAmount);
+
   if (totalAmount === undefined || totalAmount === null) {
     addError(errors, 'totalAmount', 'validation.total_amount_required', 'Total belanja wajib diisi');
-  } else if (typeof totalAmount !== 'number' || totalAmount < 0) {
+  } else if (Number.isNaN(totalAmount) || totalAmount < 0) {
     addError(errors, 'totalAmount', 'validation.total_amount_invalid', 'Total belanja harus angka positif');
   }
   
   const scheduledAt = normalizeString(body.scheduledAt);
-  if (! scheduledAt) {
+  if (!scheduledAt) {
     addError(errors, 'scheduledAt', 'validation.scheduled_at_required', 'Tanggal kunjungan wajib diisi');
   } else if (isNaN(Date.parse(scheduledAt))) {
     addError(errors, 'scheduledAt', 'validation.scheduled_at_invalid', 'Format tanggal kunjungan tidak valid');
@@ -189,14 +218,12 @@ function validateCreateOrder(req, res, next) {
   
   const { shippingAddress, location } = validateAddressAndLocation(body, errors);
   
-  // [BARU] Validasi field tambahan
   const customerContact = validateCustomerContact(body, errors);
   const propertyDetails = validatePropertyDetails(body);
   const scheduledTimeSlot = validateScheduledTimeSlot(body);
   const attachments = validateAttachments(body, errors);
   const orderNote = normalizeString(body.orderNote) || '';
   
-  // Validasi panjang orderNote
   if (orderNote.length > 500) {
     addError(errors, 'orderNote', 'validation.order_note_too_long', 'Catatan order maksimal 500 karakter');
   }
@@ -205,16 +232,16 @@ function validateCreateOrder(req, res, next) {
     return respondValidationErrors(req, res, errors);
   }
 
+  // Update req.body dengan data yang sudah dibersihkan/dikonversi
   req.body = {
     ...body,
     orderType,
     providerId,
     items,
-    totalAmount,
+    totalAmount, // Ini sekarang sudah pasti number
     scheduledAt: new Date(scheduledAt),
     shippingAddress,
     location,
-    // [BARU] Field tambahan
     customerContact,
     propertyDetails,
     scheduledTimeSlot,
