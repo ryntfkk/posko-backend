@@ -121,6 +121,9 @@ const config = {
 
   // [NEW] Secret for Cron Jobs
   cronSecret: process.env.CRON_SECRET || 'default_secret_please_change',
+
+  // [NEW] Order Expiry Configuration (Default 15 minutes)
+  orderExpiryDurationMinutes: Number(process.env.ORDER_EXPIRY_DURATION_MINUTES) || 15,
 };
 
 module.exports = config;

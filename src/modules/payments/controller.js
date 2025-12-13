@@ -133,6 +133,10 @@ async function createPayment(req, res, next) {
     const midtransOrderId = `POSKO-${order._id}-${Date.now()}`;
     const currentBaseUrl = process.env.FRONTEND_CUSTOMER_URL || "http://localhost:3000";
 
+    // [BARU] Konfigurasi Expiry
+    // Menggunakan env.orderExpiryDurationMinutes yang sudah disiapkan di Langkah 1
+    const expiryDuration = env.orderExpiryDurationMinutes || 15; // Default 15 menit jika env gagal
+    
     const transactionDetails = {
       transaction_details: {
         order_id: midtransOrderId,
@@ -144,6 +148,11 @@ async function createPayment(req, res, next) {
         phone: order.userId.phoneNumber || '',
       },
       item_details: itemDetails,
+      // [BARU] Tambahkan parameter expiry
+      expiry: {
+        unit: 'minutes',
+        duration: expiryDuration
+      },
       callbacks: {
         finish: `${currentBaseUrl}/orders/${order._id}`,
         error: `${currentBaseUrl}/orders/${order._id}`,
@@ -152,6 +161,16 @@ async function createPayment(req, res, next) {
     };
 
     const transaction = await snap.createTransaction(transactionDetails);
+
+    // [BARU] Hitung dan Simpan Waktu Expired ke Order
+    // Ini penting agar Frontend bisa menampilkan countdown yang sinkron dengan Midtrans
+    const expiryDate = new Date(Date.now() + expiryDuration * 60 * 1000);
+    
+    // Update Order dengan snapToken dan expiryTime
+    await Order.findByIdAndUpdate(order._id, {
+        snapToken: transaction.token,
+        snapExpiryTime: expiryDate
+    });
 
     // [FIX] Simpan Payment dengan Metadata yang jelas
     const payment = new Payment({
@@ -170,7 +189,8 @@ async function createPayment(req, res, next) {
         paymentId: payment._id,
         snapToken: transaction.token,
         redirectUrl: transaction.redirect_url,
-        paymentType: transactionType
+        paymentType: transactionType,
+        expiryTime: expiryDate // Kembalikan expiryTime ke frontend
       }
     });
 
@@ -231,8 +251,9 @@ async function handleNotification(req, res, next) {
         if(alreadyPaid) {
              return res.status(200).json({ message: 'Payment already processed' });
         }
-        console.warn(`⚠️ Payment record not found for Order ${realOrderId} Amount ${notifAmount}`);
-        return res.status(404).json({ message: 'Payment record not found' });
+        // [NOTE] Jika status expire, mungkin payment record juga sudah tidak valid, tapi kita tetap perlu cancel order
+        // Jadi kita lanjutkan check Order
+        console.warn(`⚠️ Payment record not found/valid for Order ${realOrderId} Amount ${notifAmount}. Checking Order status directly.`);
     }
 
     const order = await Order.findById(realOrderId);
@@ -254,58 +275,59 @@ async function handleNotification(req, res, next) {
         paymentStatus = 'failed';
     }
 
-    console.log(`🔔 Webhook: ${realOrderId} [${payment.transactionType}] status ${paymentStatus}`);
+    console.log(`🔔 Webhook: ${realOrderId} [Transaction Status: ${transactionStatus}] -> [System Status: ${paymentStatus}]`);
 
     // 5. Update Database
     if (paymentStatus === 'paid') {
-        // A. Update Payment Record
-        payment.status = 'paid';
-        await payment.save();
+        // A. Update Payment Record (Jika ada)
+        if (payment) {
+            payment.status = 'paid';
+            await payment.save();
+        }
         
         let shouldTriggerNotif = false; // Flag untuk notifikasi
 
-        // B. Update Order / Additional Fees based on Transaction Type
-        if (payment.transactionType === 'initial') {
+        // B. Update Order / Additional Fees based on logic
+        // Kita gunakan logika fallback: Jika payment record hilang, kita asumsikan ini pembayaran initial jika status order pending
+        const isInitialPayment = (payment && payment.transactionType === 'initial') || (!payment && order.status === 'pending');
+        const isAdditionalFee = (payment && payment.transactionType === 'additional_fee') || (!payment && ['working', 'waiting_approval'].includes(order.status));
+
+        if (isInitialPayment) {
              // Logic Pembayaran Utama
              if (order.status === 'pending') {
                  // [FIX] Update status dari 'pending' ke status aktif yang benar
                  const nextStatus = order.orderType === 'direct' ? 'paid' : 'searching';
                  
-                 await Order.findByIdAndUpdate(realOrderId, { status: nextStatus });
+                 // Reset expiry time karena sudah bayar
+                 await Order.findByIdAndUpdate(realOrderId, { 
+                     status: nextStatus,
+                     snapExpiryTime: null 
+                 });
                  console.log(`✅ Order ${realOrderId} updated to ${nextStatus}`);
                  
                  shouldTriggerNotif = true; // Notif: Order baru aktif
              }
         } 
-        else if (payment.transactionType === 'additional_fee') {
+        else if (isAdditionalFee) {
              // Logic Pembayaran Add-on
-             const feeIds = payment.feeId ? payment.feeId.split(',') : [];
+             const feeIds = (payment && payment.feeId) ? payment.feeId.split(',') : [];
              let updatedFees = false;
              
-             if (feeIds.length > 0) {
-                 order.additionalFees.forEach(fee => {
-                     if (feeIds.includes(fee._id.toString()) && fee.status === 'pending_approval') {
-                         fee.status = 'paid';
-                         fee.paymentId = payment._id.toString();
-                         updatedFees = true;
-                     }
-                 });
-             } else {
-                 // Fallback
-                 order.additionalFees.forEach(fee => {
+             // Update status fees di order
+             order.additionalFees.forEach(fee => {
+                 // Jika ada ID spesifik di payment record, atau jika tidak ada record, bayar semua yang pending
+                 if ((feeIds.length > 0 && feeIds.includes(fee._id.toString())) || (feeIds.length === 0 && fee.status === 'pending_approval')) {
                      if (fee.status === 'pending_approval') {
                          fee.status = 'paid';
-                         fee.paymentId = payment._id.toString();
+                         fee.paymentId = payment ? payment._id.toString() : `MIDTRANS-${orderIdFull}`;
                          updatedFees = true;
                      }
-                 });
-             }
+                 }
+             });
 
              if (updatedFees) {
                  await order.save(); 
                  console.log(`✅ Additional fees for order ${realOrderId} marked as paid.`);
-                 // Notif: Fee dibayar (Opsional, tapi bagus untuk UX)
-                 // shouldTriggerNotif = true; 
              }
         }
 
@@ -316,15 +338,24 @@ async function handleNotification(req, res, next) {
         }
 
     } 
-    // [UPDATE] Handle Expire / Failed
+    // [UPDATE] Handle Expire / Failed / Cancel
     else if (paymentStatus === 'failed') {
-        payment.status = 'failed';
-        await payment.save();
+        if (payment) {
+            payment.status = 'failed';
+            await payment.save();
+        }
 
-        // Jika order initial & failed, batalkan order
-        if (payment.transactionType === 'initial' && order.status === 'pending') {
-            await Order.findByIdAndUpdate(realOrderId, { status: 'cancelled' });
-            console.log(`❌ Order ${realOrderId} cancelled due to payment failure`);
+        // Jika order initial & failed/expire, batalkan order
+        // Cek juga transactionStatus spesifik 'expire' untuk logging yang lebih baik
+        const isExpired = transactionStatus === 'expire';
+        const isInitialContext = (payment && payment.transactionType === 'initial') || order.status === 'pending';
+
+        if (isInitialContext && order.status === 'pending') {
+            await Order.findByIdAndUpdate(realOrderId, { 
+                status: 'cancelled',
+                orderNote: (order.orderNote || '') + (isExpired ? '\n[SYSTEM] Order expired automatically by Midtrans.' : '\n[SYSTEM] Payment failed/cancelled.')
+            });
+            console.log(`❌ Order ${realOrderId} cancelled due to payment ${transactionStatus}`);
 
             // [NEW] Rollback Voucher if used
             const userVoucher = await UserVoucher.findOne({ orderId: realOrderId });
@@ -337,6 +368,7 @@ async function handleNotification(req, res, next) {
                 if (order.voucherId) {
                     await Voucher.findByIdAndUpdate(order.voucherId, { $inc: { quota: 1 } });
                 }
+                console.log(`🔄 Voucher rolled back for order ${realOrderId}`);
             }
         }
     }

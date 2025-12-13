@@ -197,7 +197,9 @@ const orderSchema = new mongoose.Schema(
       ref: 'Provider' 
     }],
     paymentId: { type: String },
-    snapToken: { type: String }
+    snapToken: { type: String },
+    // [BARU] Menyimpan waktu expired yang diset ke Midtrans (untuk sinkronisasi frontend)
+    snapExpiryTime: { type: Date, default: null }
   },
   { timestamps: true }
 );
