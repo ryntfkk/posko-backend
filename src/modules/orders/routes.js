@@ -10,9 +10,7 @@ const uploadS3 = require('../../config/s3Upload');
 const router = express.Router();
 
 // Middleware Helper: Parse JSON string dari Multipart Form Data
-// Ini diperlukan karena saat upload file, data object (seperti items/address) dikirim sebagai string JSON
 const parseMultipartBody = (req, res, next) => {
-    // List field yang dikirim sebagai JSON string oleh Frontend
     const jsonFields = [
         'items', 
         'shippingAddress', 
@@ -28,12 +26,41 @@ const parseMultipartBody = (req, res, next) => {
                 req.body[field] = JSON.parse(req.body[field]);
             } catch (e) {
                 console.error(`Gagal parsing field ${field}:`, e);
-                // Biarkan error handle oleh validator jika format salah
             }
         }
     });
 
     next();
+};
+
+// [HELPER] Wrapper untuk Upload Single dengan Error Handling
+const uploadEvidenceMiddleware = (req, res, next) => {
+    const upload = uploadS3.single('image');
+    
+    upload(req, res, (err) => {
+        if (err) {
+            return res.status(400).json({
+                message: 'Gagal mengupload bukti pekerjaan',
+                error: err.message
+            });
+        }
+        next();
+    });
+};
+
+// [HELPER] Wrapper untuk Upload Array dengan Error Handling
+const uploadAttachmentsMiddleware = (req, res, next) => {
+    const upload = uploadS3.array('attachments', 5);
+
+    upload(req, res, (err) => {
+        if (err) {
+            return res.status(400).json({
+                message: 'Gagal mengupload lampiran order',
+                error: err.message
+            });
+        }
+        next();
+    });
 };
 
 router.post('/auto-complete', controller.autoCompleteStuckOrders);
@@ -49,16 +76,16 @@ router.post('/:orderId/additional-fee', controller.requestAdditionalFee);
 router.delete('/:orderId/fees/:feeId', controller.voidAdditionalFee);
 router.put('/:orderId/fees/:feeId/reject', controller.rejectAdditionalFee);
 
-// Upload Bukti Pekerjaan
-router.post('/:orderId/completion-evidence', uploadS3.single('image'), controller.uploadCompletionEvidence);
+// [UPDATE] Upload Bukti Pekerjaan dengan Error Handling S3
+router.post('/:orderId/completion-evidence', uploadEvidenceMiddleware, controller.uploadCompletionEvidence);
 
 router.get('/', controller.listOrders);
 router.get('/:orderId', controller.getOrderById); 
 
-// Create Order dengan attachments (kondisi awal) + Parsing JSON + Validasi
+// [UPDATE] Create Order dengan Error Handling S3
 router.post('/', 
-    uploadS3.array('attachments', 5), 
-    parseMultipartBody, // [PENTING] Parse JSON string sebelum validasi
+    uploadAttachmentsMiddleware, 
+    parseMultipartBody, 
     validateCreateOrder, 
     controller.createOrder
 );

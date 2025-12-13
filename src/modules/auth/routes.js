@@ -2,58 +2,49 @@ const express = require('express');
 const controller = require('./controller');
 const { validateLogin, validateRegister, validateRefreshToken } = require('./validators');
 const authenticate = require('../../middlewares/auth');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-
-// [SETUP] Multer untuk Upload Gambar
-// Pastikan folder 'public/uploads' ada, atau buat jika belum ada
-const uploadDir = 'public/uploads';
-if (!fs.existsSync(uploadDir)){
-    fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    // Penamaan file: fieldname-timestamp-random.ext
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
-
-const upload = multer({ 
-  storage: storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // Limit naik ke 5MB untuk dokumen
-  fileFilter: (req, file, cb) => {
-    // Izinkan gambar dan PDF
-    if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
-      cb(null, true);
-    } else {
-      cb(new Error('Hanya file gambar dan PDF yang diperbolehkan!'));
-    }
-  }
-});
+// Import konfigurasi upload S3 yang sudah dibuat
+const upload = require('../../config/s3Upload');
 
 // [HELPER] Middleware Kondisional: Hanya jalankan multer jika header multipart
 const uploadProfileMiddleware = (req, res, next) => {
   const contentType = req.headers['content-type'];
   if (contentType && contentType.includes('multipart/form-data')) {
     // Gunakan .single('profilePicture') sesuai field name di frontend
-    return upload.single('profilePicture')(req, res, next);
+    // Error handling untuk upload
+    return upload.single('profilePicture')(req, res, (err) => {
+      if (err) {
+        // Handle error multer (misal file terlalu besar atau format salah)
+        return res.status(400).json({
+          message: 'Gagal mengupload gambar profil',
+          error: err.message
+        });
+      }
+      next();
+    });
   }
   next();
 };
 
 // [BARU] Middleware Upload Dokumen Mitra (Multiple Fields)
-const uploadPartnerDocs = upload.fields([
-  { name: 'ktp', maxCount: 1 },
-  { name: 'selfieKtp', maxCount: 1 },
-  { name: 'skck', maxCount: 1 },
-  { name: 'certificate', maxCount: 1 }
-]);
+// Menggunakan upload.fields dari config S3
+const uploadPartnerDocs = (req, res, next) => {
+  const uploadFields = upload.fields([
+    { name: 'ktp', maxCount: 1 },
+    { name: 'selfieKtp', maxCount: 1 },
+    { name: 'skck', maxCount: 1 },
+    { name: 'certificate', maxCount: 1 }
+  ]);
+
+  uploadFields(req, res, (err) => {
+    if (err) {
+      return res.status(400).json({
+        message: 'Gagal mengupload dokumen mitra',
+        error: err.message
+      });
+    }
+    next();
+  });
+};
 
 const router = express.Router();
 
@@ -64,7 +55,8 @@ router.post('/refresh-token', validateRefreshToken, controller.refreshToken);
 
 // Protected routes
 router.get('/profile', authenticate, controller.getProfile);
-// [FIX] Menambahkan route PUT untuk update profil dengan support upload file
+
+// [FIX] Menambahkan route PUT untuk update profil dengan support upload file S3
 router.put('/profile', authenticate, uploadProfileMiddleware, controller.updateProfile);
 
 router.post('/logout', authenticate, controller.logout);

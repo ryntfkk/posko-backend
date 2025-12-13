@@ -18,18 +18,18 @@ async function listOrders(req, res, next) {
   }
 }
 
-// 2. CREATE ORDER (Updated for S3 Attachments)
+// 2. CREATE ORDER (Updated for S3)
 async function createOrder(req, res, next) {
   try {
-    // [UPDATE] Cek apakah ada file attachments dari S3
+    // [UPDATE S3] Mapping file S3 ke format attachments database
     if (req.files && req.files.length > 0) {
-      // Mapping file S3 ke format attachments database
       const attachments = req.files.map(file => ({
-        url: file.location, // URL publik S3 (multer-s3 menggunakan properti .location)
-        type: 'image'
+        url: file.location, // Ambil URL publik dari S3
+        type: 'image',
+        // Jika originalname tersedia, bisa disimpan sebagai deskripsi atau nama
+        description: file.originalname || ''
       }));
       
-      // Masukkan ke req.body agar Service menyimpannya
       req.body.attachments = attachments;
     }
 
@@ -134,18 +134,22 @@ async function voidAdditionalFee(req, res, next) {
 // 8. UPLOAD COMPLETION EVIDENCE (Updated for S3)
 async function uploadCompletionEvidence(req, res, next) {
   try {
-    // Pastikan file ada
     if (!req.file) {
-      throw new Error('File gambar tidak ditemukan.');
+      return res.status(400).json({ message: 'File gambar wajib diunggah.' });
     }
 
-    // [UPDATE] Service harus menerima object file atau URL. 
-    // Karena req.file dari multer-s3 memiliki .location (URL), kita pastikan Service bisa menggunakannya.
+    // [UPDATE S3] Siapkan objek evidence yang bersih untuk Service
+    const evidenceData = {
+        url: req.file.location, // URL dari S3
+        type: 'photo',
+        description: req.body.description || 'Bukti penyelesaian'
+    };
+
+    // Kita kirimkan evidenceData (objek), bukan req.file mentah
     const order = await OrderService.uploadCompletionEvidence(
       req.user, 
       req.params.orderId, 
-      req.file, // Service akan membaca req.file.location
-      req.body.description
+      evidenceData
     );
 
     res.status(201).json({ 
