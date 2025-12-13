@@ -67,8 +67,6 @@ class OrderService {
   }
 
   async getProviderActiveOrderCount(providerId) {
-    // [UPDATE] Hanya status fisik bekerja yang dianggap "Active/Busy"
-    // 'paid' (Direct Order baru) TIDAK masuk sini.
     const activeStatuses = ['accepted', 'on_the_way', 'working'];
     return await Order.countDocuments({
       providerId: providerId,
@@ -303,8 +301,6 @@ class OrderService {
         discountAmount: Math.floor(discountAmount),
         voucherId,
         orderType,
-        // [FIX] Status harus 'pending' agar bisa dibayar via PaymentController
-        status: 'pending',
         scheduledAt,
         shippingAddress,
         location,
@@ -324,8 +320,7 @@ class OrderService {
       await session.commitTransaction();
       
       createdOrder = order;
-      // [FIX] Hapus broadcast di sini. Notifikasi akan dipicu via Webhook setelah pembayaran sukses.
-      shouldBroadcastBasic = false;
+      shouldBroadcastBasic = orderType === 'basic';
 
     } catch (error) {
       if (session.inTransaction()) {
@@ -336,47 +331,13 @@ class OrderService {
       session.endSession();
     }
 
-    // [FIX] Tidak memanggil _handleOrderNotifications di sini
-    // this._handleOrderNotifications(createdOrder, providerUserIdToNotify, shouldBroadcastBasic);
+    // --- SIDE EFFECTS (NOTIFICATIONS) ---
+    this._handleOrderNotifications(createdOrder, providerUserIdToNotify, shouldBroadcastBasic);
 
     return createdOrder;
   }
 
-  // [BARU] Fungsi ini dipanggil oleh PaymentController.handleNotification setelah status -> PAID
-  async triggerPostPaymentNotifications(orderId) {
-    try {
-      const order = await Order.findById(orderId)
-        .populate({
-          path: 'providerId',
-          populate: { path: 'userId', select: '_id' } 
-        });
-
-      if (!order) return;
-
-      const io = getIO();
-      if (!io) return;
-
-      // 1. Notifikasi untuk Direct Order (Ke Provider Tertentu)
-      if (order.orderType === 'direct' && order.providerId && order.providerId.userId) {
-        const providerUserId = order.providerId.userId._id.toString();
-        io.to(providerUserId).emit('order_new', {
-          message: 'Anda menerima pesanan baru! (Sudah Dibayar)',
-          order: order.toObject()
-        });
-        console.log(`[NOTIF] Sent direct order notif to ${providerUserId}`);
-      }
-
-      // 2. Notifikasi untuk Basic Order (Broadcast ke Sekitar)
-      if (order.orderType === 'basic') {
-        await this.broadcastBasicOrderToNearbyProviders(order);
-      }
-
-    } catch (error) {
-      console.error('[POST-PAYMENT NOTIF ERROR]', error);
-    }
-  }
-
-  // Helper untuk Notification (Side Effect - Legacy / Internal use)
+  // Helper untuk Notification (Side Effect)
   async _handleOrderNotifications(order, providerUserId, shouldBroadcast) {
     if (!order) return;
     try {
@@ -529,6 +490,7 @@ class OrderService {
           discountAmount: 1,
           completionEvidence: 1,
           additionalFees: 1,
+          waitingApprovalAt: 1, // [UPDATED] Menambahkan field ini agar frontend bisa hitung mundur
           items: {
             $map: {
               input: '$items',
@@ -750,16 +712,12 @@ class OrderService {
     }
   }
 
-  // [UPDATED] LIST INCOMING ORDERS
   async listIncomingOrders(user) {
     const provider = await Provider.findOne({ userId: user.userId }).lean();
     if (!provider) throw new Error('Anda belum terdaftar sebagai Mitra.');
 
-    // 1. Cek Apakah Mitra Sibuk (Active Statuses only)
     const activeOrderCount = await this.getProviderActiveOrderCount(provider._id);
 
-    // 2. Fetch Direct Orders (Order Tembak) - Status 'paid' (Belum diterima)
-    // Direct order 'paid' TIDAK menghitung activeOrderCount, jadi mitra tidak dianggap busy.
     const directOrdersPromise = Order.find({
       providerId: provider._id,
       status: 'paid'
@@ -770,20 +728,17 @@ class OrderService {
 
     let basicOrdersPromise = Promise.resolve([]);
 
-    // 3. Logic Fetch Basic Orders (Marketplace)
-    // Jika tidak ada job aktif ('accepted', 'working', etc), dan provider verified
     if (activeOrderCount === 0 && provider.verificationStatus === 'verified') {
-      
       const myServiceIds = provider.services
         .filter(s => s.isActive)
         .map(s => s.serviceId.toString());
 
       let basicQuery = {
         orderType: 'basic',
-        status: 'searching', // Webhook will set 'pending' -> 'searching' after payment
-        providerId: null, 
+        status: 'searching',
+        providerId: null,
         'items.serviceId': { $in: myServiceIds },
-        rejectedByProviders: { $ne: provider._id } 
+        rejectedByProviders: { $ne: provider._id } // [UPDATED] Exclude rejected orders
       };
 
       if (
@@ -814,16 +769,13 @@ class OrderService {
     const [directOrders, basicOrders] = await Promise.all([directOrdersPromise, basicOrdersPromise]);
 
     const combinedOrders = [...directOrders, ...basicOrders].sort((a, b) => {
-      // Prioritaskan Direct Order di atas
-      if (a.orderType === 'direct' && b.orderType !== 'direct') return -1;
-      if (a.orderType !== 'direct' && b.orderType === 'direct') return 1;
       return new Date(a.scheduledAt) - new Date(b.scheduledAt);
     });
 
     return {
       providerStatus: {
         activeOrderCount,
-        isBusy: activeOrderCount > 0, // Direct 'paid' order does NOT make provider busy
+        isBusy: activeOrderCount > 0,
         verificationStatus: provider.verificationStatus
       },
       data: combinedOrders
@@ -1047,7 +999,7 @@ class OrderService {
     return order;
   }
 
-  // [BARU] 7b. VOID ADDITIONAL FEE
+  // [BARU] VOID ADDITIONAL FEE (PROVIDER CANCEL REQUEST)
   async voidAdditionalFee(user, orderId, feeId) {
     const provider = await Provider.findOne({ userId: user.userId });
     if (!provider) throw new Error('Unauthorized provider');
@@ -1073,7 +1025,6 @@ class OrderService {
     return order;
   }
 
-  // 8. UPLOAD COMPLETION EVIDENCE
   async uploadCompletionEvidence(user, orderId, file, description) {
     if (!file) throw new Error('File gambar wajib diupload.');
     
@@ -1096,7 +1047,6 @@ class OrderService {
     return order;
   }
 
-  // 9. REJECT ADDITIONAL FEE
   async rejectAdditionalFee(user, orderId, feeId) {
     const order = await Order.findById(orderId);
     if (!order) throw new Error('Order not found');
@@ -1111,7 +1061,6 @@ class OrderService {
     return order;
   }
 
-  // 10. AUTO COMPLETE STUCK ORDERS (CRON JOB)
   async autoCompleteStuckOrders(cronSecret) {
     if (cronSecret !== env.cronSecret) throw new Error('Forbidden: Invalid Cron Secret');
 

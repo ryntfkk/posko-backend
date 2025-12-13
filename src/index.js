@@ -1,11 +1,11 @@
-// src/index.js
 const express = require('express');
 const cors = require('cors');
-const http = require('http');
+const http = require('http'); // Tetap butuh untuk local dev
 const env = require('./config/env');
 const { i18nMiddleware } = require('./config/i18n');
-// Socket diimport untuk inisialisasi
-const { initSocket } = require('./modules/chat/socket'); 
+// Socket tetap diimport supaya tidak error, walau tidak jalan di Vercel
+const { initSocket } = require('./modules/chat/socket');
+const { initScheduler } = require('./scheduler'); // [BARU] Import Scheduler
 
 // Import database utilities
 const { connectDB, getConnectionStatus } = require('./utils/db');
@@ -21,81 +21,54 @@ const paymentRoutes = require('./modules/payments/routes');
 const chatRoutes = require('./modules/chat/routes');
 const settingsRoutes = require('./modules/settings/routes');
 const voucherRoutes = require('./modules/vouchers/routes');
-const earningsRoutes = require('./modules/earnings/routes'); 
-const uploadRoutes = require('./modules/upload/routes');
-// [BARU] Import Region Routes (Ini yang sebelumnya hilang)
-const regionRoutes = require('./modules/regions/routes');
+const earningsRoutes = require('./modules/earnings/routes'); // [BARU] Import route earnings
+const uploadRoutes = require('./modules/upload/routes'); // [BARU] Import route upload
 const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
 
-// --- 1. SETUP LOGGING (PENTING UNTUK DEBUGGING 502) ---
-// Middleware ini akan mencatat setiap request yang masuk ke EC2
-app.use((req, res, next) => {
-  const start = Date.now();
-  // Tangkap saat response selesai dikirim
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    const time = new Date().toISOString();
-    // Format Log: [WAKTU] METHOD URL STATUS - DURASI
-    const logMessage = `[${time}] ${req.method} ${req.url} ${res.statusCode} - ${duration}ms`;
-    
-    // Warna log sederhana untuk membedakan error (Status >= 400)
-    if (res.statusCode >= 400) {
-      console.error('❌ ' + logMessage);
-    } else {
-      console.log('✅ ' + logMessage);
-    }
-  });
-  next();
-});
-
-// --- 2. SETUP CORS YANG LEBIH ROBUST ---
+// [FIXED] Konfigurasi CORS dengan multiple origins yang aman
 const corsOptions = {
   origin: function (origin, callback) {
-    const allowedOrigins = env.corsOrigins || [];
+    const allowedOrigins = env.corsOrigins;
     
-    // Izinkan request tanpa origin (seperti dari Postman, Mobile App, atau Server-to-Server request)
+    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      // Log warning tapi jangan crash app, berikan pesan error jelas
-      console.warn(`⚠️  CORS Blocked request from origin: ${origin}`);
-      callback(new Error(`CORS policy blocked access from origin: ${origin}`));
+      console.warn(`⚠️ CORS blocked request from origin: ${origin}`);
+      callback(new Error('Not allowed by CORS policy'));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   optionsSuccessStatus: 200
 };
 
 app.use(cors(corsOptions));
+
 app.use(i18nMiddleware);
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // Tambahan agar bisa parse form-data standar
 
-// --- 3. HEALTH CHECK ROUTES ---
-// Route root sederhana untuk cek server hidup (tanpa cek DB)
+// Health Check
 app.get('/', (req, res) => {
-  res.status(200).send('Posko Backend is Running on EC2!');
+  res.status(200).send('Posko Backend Vercel is Running! ');
 });
 
-// Database Health Check Endpoint (Detail)
+// Database Health Check Endpoint
 app.get('/api/health', (req, res) => {
-  const dbStatus = getConnectionStatus();
-  const statusCode = dbStatus.isConnected ? 200 : 503;
+  const statusCode = getConnectionStatus().isConnected ? 200 : 503;
   
   res.status(statusCode).json({
-    status: dbStatus.isConnected ? 'healthy' : 'unhealthy',
-    database: dbStatus,
+    status: getConnectionStatus().isConnected ? 'healthy' : 'unhealthy',
+    database: getConnectionStatus(),
     timestamp: new Date().toISOString(),
   });
 });
 
-// --- 4. ROUTES APLIKASI ---
 // Apply database health check middleware to all API routes that need database
 app.use('/api/auth', requireDbConnection, authRoutes);
 app.use('/api/orders', requireDbConnection, orderRoutes);
@@ -107,42 +80,37 @@ app.use('/api/services', requireDbConnection, serviceRoutes);
 app.use('/api/settings', requireDbConnection, settingsRoutes);
 app.use('/api/vouchers', requireDbConnection, voucherRoutes);
 app.use('/api/earnings', requireDbConnection, earningsRoutes); 
-app.use('/api/upload', requireDbConnection, uploadRoutes);
-// [BARU] Daftarkan Region Route (Ini Wajib Ada!)
-app.use('/api/regions', requireDbConnection, regionRoutes);
+app.use('/api/upload', requireDbConnection, uploadRoutes); // [BARU] Endpoint upload
 
-// Global Error Handler
 app.use(errorHandler);
 
-// --- 5. DB CONNECTION & SERVER STARTUP ---
+// --- DATABASE CONNECTION (SERVERLESS FRIENDLY) ---
 // Initialize database connection at startup
+// This is called but not blocking - the middleware will ensure connection per request
 connectDB().catch((err) => {
-  console.error('❌ Critical: Initial database connection failed:', err.message);
-  // Kita tidak exit process disini agar server HTTP tetap bisa jalan untuk debugging health check
+  console.error('❌ Initial database connection failed:', err.message);
 });
 
-// Menangani error yang tidak tertangkap agar server tidak mati mendadak
-process.on('uncaughtException', (err) => {
-  console.error('🔥 UNCAUGHT EXCEPTION! Server tetap berjalan. Error:', err);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('🔥 UNHANDLED REJECTION! Server tetap berjalan. Reason:', reason);
-});
-
+// --- EKSPOR APLIKASI UNTUK VERCEL ---
 module.exports = app;
 
-// --- EKSKEKUSI SERVER ---
+// --- JALANKAN SERVER UNTUK LOCALHOST / EC2 ---
+// Kode di bawah ini HANYA jalan kalau dijalankan di mode server (node src/index.js)
+// Di Vercel, kode di bawah ini akan diabaikan
 if (require.main === module) {
   const server = http.createServer(app);
   const PORT = process.env.PORT || 4000;
   
-  // Inisialisasi Socket.io
+  // Socket hanya jalan di mode server
   initSocket(server);
 
-  // PENTING: Listen ke '0.0.0.0' agar bisa diakses dari Public IP EC2
-  server.listen(PORT, '0.0.0.0', () => {
+  // [BARU] Inisialisasi Scheduler (Cron Job)
+  // Scheduler hanya dijalankan jika server menyala terus (EC2/VPS), bukan di Serverless function
+  initScheduler(); 
+
+  server.listen(PORT, () => {
     console.log(`🚀 Server berjalan di port ${PORT}`);
-    console.log(`📡 Menunggu request... (CORS Origins: ${env.corsOrigins ? env.corsOrigins.join(', ') : 'All'})`);
+    console.log(`✅ CORS Origins diizinkan: ${env.corsOrigins.join(', ')}`);
+    console.log(`⏰ Cron Scheduler aktif (Check daily at 02:00 WIB)`);
   });
 }
