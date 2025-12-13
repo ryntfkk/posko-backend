@@ -1,73 +1,43 @@
-// src/modules/regions/controller.js
 const Region = require('./model');
 
-// 1. Ambil Semua Provinsi
-async function listProvinces(req, res, next) {
+exports.getProvinces = async (req, res, next) => {
   try {
+    // Mengambil semua wilayah dengan tipe 'province'
+    // Diurutkan berdasarkan nama secara ascending (A-Z)
     const provinces = await Region.find({ type: 'province' })
-      .select('id name')
+      .select('id name type') // Kita hanya butuh field ini untuk dropdown
       .sort({ name: 1 });
-    
-    res.json(provinces);
+
+    res.status(200).json({
+      success: true,
+      data: provinces
+    });
   } catch (error) {
     next(error);
   }
-}
+};
 
-// 2. Ambil Kota berdasarkan ID Provinsi
-async function listRegencies(req, res, next) {
+exports.getRegionsByParent = async (req, res, next) => {
   try {
-    const { provinceId } = req.params;
-    const regencies = await Region.find({ 
-      type: 'regency', 
-      parentId: provinceId 
-    })
-      .select('id name')
+    const { parentId } = req.params;
+
+    if (!parentId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Parent ID is required'
+      });
+    }
+
+    // Mengambil wilayah anak (kota/kecamatan/kelurahan) berdasarkan parentId
+    const regions = await Region.find({ parentId: parentId })
+      .select('id name type parentId')
       .sort({ name: 1 });
 
-    res.json(regencies);
+    res.status(200).json({
+      success: true,
+      data: regions
+    });
   } catch (error) {
     next(error);
   }
-}
-
-// 3. Ambil Kecamatan berdasarkan ID Kota
-async function listDistricts(req, res, next) {
-  try {
-    const { regencyId } = req.params;
-    const districts = await Region.find({ 
-      type: 'district', 
-      parentId: regencyId 
-    })
-      .select('id name')
-      .sort({ name: 1 });
-
-    res.json(districts);
-  } catch (error) {
-    next(error);
-  }
-}
-
-// 4. Ambil Kelurahan berdasarkan ID Kecamatan
-async function listVillages(req, res, next) {
-  try {
-    const { districtId } = req.params;
-    const villages = await Region.find({ 
-      type: 'village', 
-      parentId: districtId 
-    })
-      .select('id name')
-      .sort({ name: 1 });
-
-    res.json(villages);
-  } catch (error) {
-    next(error);
-  }
-}
-
-module.exports = {
-  listProvinces,
-  listRegencies,
-  listDistricts,
-  listVillages
 };

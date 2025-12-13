@@ -24,6 +24,7 @@ const voucherRoutes = require('./modules/vouchers/routes');
 const earningsRoutes = require('./modules/earnings/routes'); // [BARU] Import route earnings
 const uploadRoutes = require('./modules/upload/routes'); // [BARU] Import route upload
 const errorHandler = require('./middlewares/errorHandler');
+const regionRoutes = require('./modules/regions/routes');
 
 const app = express();
 
@@ -81,6 +82,7 @@ app.use('/api/settings', requireDbConnection, settingsRoutes);
 app.use('/api/vouchers', requireDbConnection, voucherRoutes);
 app.use('/api/earnings', requireDbConnection, earningsRoutes); 
 app.use('/api/upload', requireDbConnection, uploadRoutes); // [BARU] Endpoint upload
+app.use('/api/regions', regionRoutes);
 
 app.use(errorHandler);
 

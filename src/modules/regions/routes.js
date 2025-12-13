@@ -1,19 +1,18 @@
-// src/modules/regions/routes.js
 const express = require('express');
 const router = express.Router();
-const RegionController = require('./controller');
+const controller = require('./controller');
+const { optionalAuth } = require('../../middlewares/optionalAuth'); // Optional: jika ingin diproteksi atau public
 
-// Definisi URL Endpoint
-// GET /api/regions/provinces
-router.get('/provinces', RegionController.listProvinces);
+// Route: GET /api/regions/provinces
+// Mengambil semua provinsi untuk dropdown pertama
+router.get('/provinces', controller.getProvinces);
 
-// GET /api/regions/regencies/:provinceId
-router.get('/regencies/:provinceId', RegionController.listRegencies);
-
-// GET /api/regions/districts/:regencyId
-router.get('/districts/:regencyId', RegionController.listDistricts);
-
-// GET /api/regions/villages/:districtId
-router.get('/villages/:districtId', RegionController.listVillages);
+// Route: GET /api/regions/children/:parentId
+// Mengambil wilayah anak (Kota/Kecamatan/Kelurahan)
+// Contoh penggunaan:
+// - Masukkan ID Provinsi -> Dapat Kota
+// - Masukkan ID Kota -> Dapat Kecamatan
+// - Masukkan ID Kecamatan -> Dapat Kelurahan
+router.get('/children/:parentId', controller.getRegionsByParent);
 
 module.exports = router;
